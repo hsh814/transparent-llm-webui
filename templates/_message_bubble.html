@@ -4,6 +4,9 @@
     {% if message.model %}
     <span class="badge">{{ message.model }}{% if message.reasoning_effort %} · effort: {{ message.reasoning_effort }}{% endif %}</span>
     {% endif %}
+    {% if message.total_tokens is not none %}
+    <span class="badge badge-usage" title="prompt {{ message.prompt_tokens }} · completion {{ message.completion_tokens }}">{{ message.total_tokens }} tok</span>
+    {% endif %}
     {% if message.role != 'system' %}
     <button class="btn-mini"
             hx-post="/sessions/{{ session.id }}/messages/{{ message.id }}/delete"

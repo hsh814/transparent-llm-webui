@@ -258,6 +258,12 @@ body {
   font-size: 11px;
 }
 
+.badge-usage {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+
 .reasoning {
   border-left: 3px solid var(--border);
   padding-left: 8px;

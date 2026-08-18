@@ -42,6 +42,9 @@ CREATE TABLE IF NOT EXISTS messages (
   reasoning TEXT,
   model TEXT,
   reasoning_effort TEXT,
+  prompt_tokens INTEGER,
+  completion_tokens INTEGER,
+  total_tokens INTEGER,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 """
@@ -83,6 +86,10 @@ def init_db() -> None:
             conn.execute(
                 "INSERT INTO folders (name, system_prompt, is_memo) VALUES ('Memo', '', 1)"
             )
+        msg_cols = {row["name"] for row in conn.execute("PRAGMA table_info(messages)")}
+        for col in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            if col not in msg_cols:
+                conn.execute(f"ALTER TABLE messages ADD COLUMN {col} INTEGER")
         conn.commit()
 
 
@@ -264,12 +271,26 @@ def add_message(
     reasoning: str | None = None,
     model: str | None = None,
     reasoning_effort: str | None = None,
+    prompt_tokens: int | None = None,
+    completion_tokens: int | None = None,
+    total_tokens: int | None = None,
 ) -> dict:
     with _lock:
         cur = _get_conn().execute(
-            "INSERT INTO messages (session_id, role, content, reasoning, model, reasoning_effort)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
-            (session_id, role, content, reasoning, model, reasoning_effort),
+            "INSERT INTO messages (session_id, role, content, reasoning, model,"
+            " reasoning_effort, prompt_tokens, completion_tokens, total_tokens)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                session_id,
+                role,
+                content,
+                reasoning,
+                model,
+                reasoning_effort,
+                prompt_tokens,
+                completion_tokens,
+                total_tokens,
+            ),
         )
         _get_conn().execute(
             "UPDATE sessions SET updated_at = datetime('now') WHERE id = ?",
@@ -280,6 +301,23 @@ def add_message(
             "SELECT * FROM messages WHERE id = ?", (cur.lastrowid,)
         ).fetchone()
     return dict(row)
+
+
+def session_token_total(session_id: int) -> dict:
+    """Sum token usage across the session's assistant messages."""
+    with _lock:
+        row = _get_conn().execute(
+            "SELECT COALESCE(SUM(prompt_tokens), 0),"
+            " COALESCE(SUM(completion_tokens), 0),"
+            " COALESCE(SUM(total_tokens), 0)"
+            " FROM messages WHERE session_id = ? AND role = 'assistant'",
+            (session_id,),
+        ).fetchone()
+    return {
+        "prompt": int(row[0]),
+        "completion": int(row[1]),
+        "total": int(row[2]),
+    }
 
 
 def delete_message(message_id: int) -> None:

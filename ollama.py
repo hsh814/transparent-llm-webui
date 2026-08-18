@@ -98,9 +98,12 @@ def _build_payload(model: str, messages: list[dict], params: dict) -> dict:
 def chat_stream(model: str, messages: list[dict], params: dict) -> Iterator[dict]:
     """Stream chat completions.
 
-    Yields {"type": "reasoning"|"content"|"done", "text": ...} per chunk.
+    Yields {"type": "reasoning"|"content"|"done", "text": ...} per chunk;
+    the final "done" chunk also carries "usage" (dict or None).
     """
     payload = _build_payload(model, messages, params)
+    payload["stream_options"] = {"include_usage": True}
+    usage: dict | None = None
     with _client() as client:
         with client.stream("POST", "/chat/completions", json=payload) as resp:
             resp.raise_for_status()
@@ -109,24 +112,27 @@ def chat_stream(model: str, messages: list[dict], params: dict) -> Iterator[dict
                     continue
                 data = line[5:].strip()
                 if data == "[DONE]":
-                    yield {"type": "done", "text": ""}
-                    return
+                    break
                 try:
                     chunk = json.loads(data)
                 except json.JSONDecodeError:
                     continue
+                if chunk.get("usage"):
+                    usage = chunk.get("usage")
                 choices = chunk.get("choices") or []
                 if not choices:
                     continue
                 delta = choices[0].get("delta") or {}
                 finish = choices[0].get("finish_reason")
                 if finish is not None:
-                    yield {"type": "done", "text": ""}
-                    return
+                    # Stop yielding content, but keep reading: Ollama sends the
+                    # usage chunk after the finish_reason chunk, before [DONE].
+                    continue
                 if delta.get("reasoning"):
                     yield {"type": "reasoning", "text": delta["reasoning"]}
                 if delta.get("content"):
                     yield {"type": "content", "text": delta["content"]}
+            yield {"type": "done", "text": "", "usage": usage}
 
 
 def chat_once(model: str, messages: list[dict], params: dict) -> tuple[str, str | None]:

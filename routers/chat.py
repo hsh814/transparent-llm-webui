@@ -146,7 +146,12 @@ def stream_message(request: Request, session_id: int, since: int = 0):
                     "_message_bubble.html"
                 ).render(request=request, message=row, session=session)
                 bubble = " ".join(bubble.split())
-                yield _sse("done", bubble)
+                session_total = db.session_token_total(session_id)
+                oob = templating.templates.env.get_template(
+                    "_session_usage.html"
+                ).render(request=request, session=session, total=session_total, oob=True)
+                oob = " ".join(oob.split())
+                yield _sse("done", bubble + " " + oob)
 
             return StreamingResponse(
                 replay(), media_type="text/event-stream", headers=_stream_headers()
@@ -158,6 +163,7 @@ def stream_message(request: Request, session_id: int, since: int = 0):
         try:
             full_content: list[str] = []
             full_reasoning: list[str] = []
+            usage: dict | None = None
             for chunk in ollama.chat_stream(session["model"], messages, params):
                 ctype = chunk["type"]
                 if ctype == "content":
@@ -167,6 +173,7 @@ def stream_message(request: Request, session_id: int, since: int = 0):
                     full_reasoning.append(chunk["text"])
                     yield _sse("reasoning", chunk["text"])
                 elif ctype == "done":
+                    usage = chunk.get("usage")
                     break
             content = "".join(full_content)
             reasoning = "".join(full_reasoning) or None
@@ -177,13 +184,21 @@ def stream_message(request: Request, session_id: int, since: int = 0):
                 reasoning=reasoning,
                 model=session["model"],
                 reasoning_effort=params.get("reasoning_effort"),
+                prompt_tokens=usage.get("prompt_tokens") if usage else None,
+                completion_tokens=usage.get("completion_tokens") if usage else None,
+                total_tokens=usage.get("total_tokens") if usage else None,
             )
             bubble = templating.templates.env.get_template(
                 "_message_bubble.html"
             ).render(request=request, message=row, session=session)
             # SSE: blank lines terminate an event — collapse the HTML to one line.
             bubble = " ".join(bubble.split())
-            yield _sse("done", bubble)
+            session_total = db.session_token_total(session_id)
+            oob = templating.templates.env.get_template(
+                "_session_usage.html"
+            ).render(request=request, session=session, total=session_total, oob=True)
+            oob = " ".join(oob.split())
+            yield _sse("done", bubble + " " + oob)
         except Exception as exc:  # surface upstream failures to the UI
             error_bubble = (
                 '<div class="message assistant"><div class="message-meta">'

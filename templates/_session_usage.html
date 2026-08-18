@@ -1,0 +1,2 @@
+<span class="badge badge-usage" id="session-usage"{% if oob %} hx-swap-oob="true"{% endif %}
+      title="Token usage for this session">Tokens: {{ total.total if total else 0 }}</span>

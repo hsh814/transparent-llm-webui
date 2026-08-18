@@ -47,6 +47,7 @@ def chat_messages(session_id: int) -> list[dict]:
 
 templates.env.globals["chat_context"] = chat_context
 templates.env.globals["chat_messages"] = chat_messages
+templates.env.globals["session_token_total"] = db.session_token_total
 
 
 def folders_with_sessions() -> list[dict]:

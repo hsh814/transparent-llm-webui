@@ -2,6 +2,7 @@
 {% set params = session.params_json | from_json %}
 {% set ctx = chat_context(session) %}
 {% set messages = chat_messages(session.id) %}
+{% set total = session_token_total(session.id) %}
 <div class="chat-header">
   <div class="chat-title">
     <form hx-post="/sessions/{{ session.id }}/rename"
@@ -12,6 +13,7 @@
     </form>
   </div>
   <button class="btn-mini" type="button" id="copy-all-btn">Copy all</button>
+  {% include "_session_usage.html" %}
   {% if not (folder and folder.is_memo) %}
   {% with models=ctx.models, usage=ctx.usage, ctx_cap=ctx.ctx_cap %}
   {% include "_model_selector.html" %}

@@ -4,13 +4,16 @@
   <div class="folder-row">
     <span class="folder-name">{{ folder.name }}</span>
     <span class="folder-actions">
+      {% if not folder.is_memo %}
       <button class="btn-mini"
               hx-post="/folders/{{ folder.id }}/delete"
               hx-target="#folder-list"
               hx-swap="innerHTML"
               hx-confirm="Delete this folder and all its chats?">×</button>
+      {% endif %}
     </span>
   </div>
+  {% if not folder.is_memo %}
   <details class="folder-edit">
     <summary>Edit</summary>
     <form hx-post="/folders/{{ folder.id }}/update"
@@ -22,6 +25,7 @@
       <button class="btn" type="submit">Save</button>
     </form>
   </details>
+  {% endif %}
   <div class="session-list">
     {% with sessions=folder.sessions, current_session_id=current_session_id %}
     {% include "_session_list.html" %}

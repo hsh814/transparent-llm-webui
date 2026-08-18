@@ -234,6 +234,11 @@ body {
   font-size: 13px;
 }
 
+.message.memo {
+  background: var(--surface);
+  border-left: 3px solid var(--muted);
+}
+
 .message-meta {
   display: flex;
   align-items: center;
@@ -321,6 +326,8 @@ body {
 }
 
 .btn-mini:hover { border-color: var(--danger); color: var(--danger); }
+
+.btn-copy:hover { border-color: var(--accent); color: var(--accent); }
 
 .btn-refresh {
   background: transparent;

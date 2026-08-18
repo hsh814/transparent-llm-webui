@@ -11,6 +11,9 @@
             hx-swap="innerHTML"
             hx-confirm="Delete this message?">×</button>
     {% endif %}
+    <button class="btn-mini btn-copy"
+            type="button"
+            onclick='navigator.clipboard.writeText({{ message.content | tojson }})'>Copy</button>
   </div>
   {% if message.reasoning %}
   <details class="reasoning" open>

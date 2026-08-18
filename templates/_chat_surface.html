@@ -11,6 +11,8 @@
       <input type="text" name="title" value="{{ session.title }}" class="title-input">
     </form>
   </div>
+  <button class="btn-mini" type="button" id="copy-all-btn">Copy all</button>
+  {% if not (folder and folder.is_memo) %}
   {% with models=ctx.models, usage=ctx.usage, ctx_cap=ctx.ctx_cap %}
   {% include "_model_selector.html" %}
   {% endwith %}
@@ -20,17 +22,29 @@
     {% include "_params_panel.html" %}
     {% endwith %}
   </details>
+  {% endif %}
 </div>
+{% if not (folder and folder.is_memo) %}
 {% include "_system_prompt.html" %}
+{% endif %}
 <div id="message-list" class="message-list">
   {% include "_chat_messages.html" %}
 </div>
+{% if folder and folder.is_memo %}
+<form class="composer" hx-post="/sessions/{{ session.id }}/memo"
+      hx-target="#message-list" hx-swap="beforeend"
+      hx-disabled-elt="find button[type=submit]">
+  <textarea name="content" rows="2" placeholder="Write a memo…" required></textarea>
+  <button type="submit" class="btn">Save</button>
+</form>
+{% else %}
 <form class="composer" hx-post="/sessions/{{ session.id }}/send"
       hx-target="#message-list" hx-swap="beforeend"
       hx-disabled-elt="find button[type=submit]">
   <textarea name="content" rows="2" placeholder="Message…" required></textarea>
   <button type="submit" class="btn">Send</button>
 </form>
+{% endif %}
 {% else %}
 <div class="empty-state">
   <p>Select a chat, or create a folder and a new chat to begin.</p>

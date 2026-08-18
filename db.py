@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS folders (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,
   system_prompt TEXT NOT NULL DEFAULT '',
+  is_memo INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -72,6 +73,16 @@ def init_db() -> None:
         cols = {row["name"] for row in conn.execute("PRAGMA table_info(sessions)")}
         if "params_updated_at" not in cols:
             conn.execute("ALTER TABLE sessions ADD COLUMN params_updated_at TEXT")
+        folder_cols = {row["name"] for row in conn.execute("PRAGMA table_info(folders)")}
+        if (
+            conn.execute(
+                "SELECT id FROM folders WHERE is_memo = 1 ORDER BY id LIMIT 1"
+            ).fetchone()
+            is None
+        ):
+            conn.execute(
+                "INSERT INTO folders (name, system_prompt, is_memo) VALUES ('Memo', '', 1)"
+            )
         conn.commit()
 
 
@@ -94,6 +105,14 @@ def get_folder(folder_id: int) -> dict | None:
     with _lock:
         row = _get_conn().execute(
             "SELECT * FROM folders WHERE id = ?", (folder_id,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def get_memo_folder() -> dict | None:
+    with _lock:
+        row = _get_conn().execute(
+            "SELECT * FROM folders WHERE is_memo = 1 ORDER BY id LIMIT 1"
         ).fetchone()
     return dict(row) if row else None
 

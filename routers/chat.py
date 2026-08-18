@@ -41,6 +41,7 @@ def _build_messages(folder: dict, session: dict) -> list[dict]:
     return [
         {"role": row["role"], "content": row["content"]}
         for row in db.list_messages(session["id"])
+        if row["role"] != "memo"
     ]
 
 
@@ -104,6 +105,24 @@ def send_message(request: Request, session_id: int, content: str = Form(...)):
             )
             break
     return system_oob + user_bubble + stream_bubble
+
+
+@router.post("/sessions/{session_id}/memo", response_class=HTMLResponse)
+def post_memo(request: Request, session_id: int, content: str = Form(...)):
+    session = db.get_session(session_id)
+    if session is None:
+        return HTMLResponse("", status_code=404)
+    folder = db.get_folder(session["folder_id"])
+    if folder is None or not folder.get("is_memo"):
+        return HTMLResponse("", status_code=403)
+    memo_text = content.strip()
+    if not memo_text:
+        return HTMLResponse("", status_code=400)
+    row = db.add_message(session_id, "memo", memo_text)
+    bubble = templating.templates.env.get_template(
+        "_message_bubble.html"
+    ).render(request=request, message=row, session=session, streaming=False)
+    return HTMLResponse(bubble)
 
 
 @router.get("/sessions/{session_id}/stream")

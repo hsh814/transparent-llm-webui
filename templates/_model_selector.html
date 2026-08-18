@@ -1,0 +1,23 @@
+<form class="model-selector" id="model-selector"
+      hx-post="/sessions/{{ session.id }}/model"
+      hx-target="#model-selector"
+      hx-swap="outerHTML"
+      hx-trigger="change">
+  <label>Model
+    <select name="model">
+      {% set ranked = models | sort_models(usage) %}
+      {% for m in ranked %}
+      <option value="{{ m }}" {{ 'selected' if m == session.model else '' }}>{{ m }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  {# carry current params so a model change preserves them #}
+  <input type="hidden" name="reasoning_effort" value="{{ params.get('reasoning_effort', 'low') }}">
+  <input type="hidden" name="temperature" value="{{ params.get('temperature', 0.7) }}">
+  <input type="hidden" name="top_p" value="{{ params.get('top_p', 0.9) }}">
+  <input type="hidden" name="max_tokens" value="{{ params.get('max_tokens', 1024) }}">
+  <input type="hidden" name="num_ctx" value="{{ params.get('num_ctx', 8192) }}">
+  <input type="hidden" name="top_k" value="{{ params.get('top_k', 40) }}">
+  <input type="hidden" name="repeat_penalty" value="{{ params.get('repeat_penalty', 1.1) }}">
+  <input type="hidden" name="seed" value="{{ params.get('seed', '') if params.get('seed') is not none else '' }}">
+</form>

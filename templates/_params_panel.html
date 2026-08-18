@@ -1,0 +1,62 @@
+<form class="params-panel" id="params-panel"
+      hx-post="/sessions/{{ session.id }}/model"
+      hx-target="#params-panel"
+      hx-swap="outerHTML">
+  <input type="hidden" name="model" value="{{ session.model }}">
+  <div class="param-row">
+    <label>Reasoning effort
+      <select name="reasoning_effort">
+        {% for level in ['none', 'low', 'medium', 'high', 'max'] %}
+        <option value="{{ level }}" {{ 'selected' if params.get('reasoning_effort', 'low') == level else '' }}>{{ level }}</option>
+        {% endfor %}
+      </select>
+    </label>
+  </div>
+  <div class="param-row">
+    <label>Temperature <span class="param-value">{{ params.get('temperature', 0.7) }}</span>
+      <input type="range" name="temperature" min="0" max="2" step="0.05"
+             value="{{ params.get('temperature', 0.7) }}"
+             oninput="this.previousElementSibling.textContent = this.value">
+    </label>
+  </div>
+  <div class="param-row">
+    <label>Top P <span class="param-value">{{ params.get('top_p', 0.9) }}</span>
+      <input type="range" name="top_p" min="0" max="1" step="0.05"
+             value="{{ params.get('top_p', 0.9) }}"
+             oninput="this.previousElementSibling.textContent = this.value">
+    </label>
+  </div>
+  <div class="param-row">
+    <label>Max tokens
+      <input type="number" name="max_tokens" min="1" max="8192"
+             value="{{ params.get('max_tokens', 1024) }}">
+    </label>
+  </div>
+  <div class="param-row">
+    <label>Context (num_ctx)
+      <input type="number" name="num_ctx" min="512" max="{{ ctx_cap }}"
+             value="{{ params.get('num_ctx', 8192) }}">
+    </label>
+    <span class="muted">max {{ ctx_cap }}</span>
+  </div>
+  <details class="advanced">
+    <summary>Advanced</summary>
+    <div class="param-row">
+      <label>Top K
+        <input type="number" name="top_k" min="0" max="200" value="{{ params.get('top_k', 40) }}">
+      </label>
+    </div>
+    <div class="param-row">
+      <label>Repeat penalty
+        <input type="number" name="repeat_penalty" min="0" max="2" step="0.05"
+               value="{{ params.get('repeat_penalty', 1.1) }}">
+      </label>
+    </div>
+    <div class="param-row">
+      <label>Seed (blank = random)
+        <input type="number" name="seed" value="{{ params.get('seed', '') if params.get('seed') is not none else '' }}">
+      </label>
+    </div>
+  </details>
+  <button type="submit" class="btn">Apply</button>
+</form>

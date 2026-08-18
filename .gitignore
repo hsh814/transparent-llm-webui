@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+chat.db
+*.pyc
+
+AGENTS.md
+.env

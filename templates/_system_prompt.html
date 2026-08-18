@@ -1,0 +1,9 @@
+<details class="system-prompt" id="system-prompt-block" open>
+  <summary>System Prompt ({{ 'set' if folder.system_prompt else 'empty' }})</summary>
+  {% if folder.system_prompt %}
+  <pre>{{ folder.system_prompt }}</pre>
+  {% else %}
+  <p class="muted">No system prompt for this folder.</p>
+  {% endif %}
+  <p class="muted">This text is sent verbatim to the model as the system message.</p>
+</details>

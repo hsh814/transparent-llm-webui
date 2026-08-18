@@ -1,0 +1,16 @@
+<div class="message assistant streaming"
+     id="stream-bubble-{{ user_message_id }}"
+     sse-connect="/sessions/{{ session.id }}/stream?since={{ user_message_id }}"
+     sse-close="done"
+     sse-swap="done"
+     hx-swap="outerHTML">
+  <div class="message-meta">
+    <span class="role-label">assistant</span>
+    <span class="badge">{{ session.model }}{% if effort %} · effort: {{ effort }}{% endif %}</span>
+  </div>
+  <details class="reasoning" open>
+    <summary>Thinking</summary>
+    <div class="reasoning-text" sse-swap="reasoning" hx-swap="beforeend"></div>
+  </details>
+  <div class="content" sse-swap="content" hx-swap="beforeend"></div>
+</div>

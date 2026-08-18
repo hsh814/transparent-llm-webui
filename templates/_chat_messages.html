@@ -1,0 +1,6 @@
+{% for message in messages %}
+{% include "_message_bubble.html" %}
+{% endfor %}
+{% if not messages %}
+<p class="muted">No messages yet.</p>
+{% endif %}

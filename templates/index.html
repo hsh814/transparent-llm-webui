@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block body %}
+<div class="layout">
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <h1>Simple AI Chat</h1>
+      <button class="btn"
+              hx-post="/folders"
+              hx-vals='{"name": "New Folder", "system_prompt": ""}'
+              hx-target="#folder-list"
+              hx-swap="innerHTML">+ Folder</button>
+    </div>
+    <div id="folder-list">
+      {% set current_session_id = current_session.id if current_session else none %}
+      {% include "_folder_list.html" %}
+    </div>
+  </aside>
+  <main class="main">
+    <div id="chat-surface">
+      {% set folder = current_folder %}
+      {% set session = current_session %}
+      {% include "_chat_surface.html" %}
+    </div>
+  </main>
+</div>
+{% endblock %}

@@ -1,0 +1,22 @@
+<div class="message {{ message.role }}" id="message-{{ message.id }}">
+  <div class="message-meta">
+    <span class="role-label">{{ message.role }}</span>
+    {% if message.model %}
+    <span class="badge">{{ message.model }}{% if message.reasoning_effort %} · effort: {{ message.reasoning_effort }}{% endif %}</span>
+    {% endif %}
+    {% if message.role != 'system' %}
+    <button class="btn-mini"
+            hx-post="/sessions/{{ session.id }}/messages/{{ message.id }}/delete"
+            hx-target="#message-list"
+            hx-swap="innerHTML"
+            hx-confirm="Delete this message?">×</button>
+    {% endif %}
+  </div>
+  {% if message.reasoning %}
+  <details class="reasoning" open>
+    <summary>Thinking</summary>
+    <div class="reasoning-text">{{ message.reasoning }}</div>
+  </details>
+  {% endif %}
+  <div class="content">{{ message.content }}</div>
+</div>

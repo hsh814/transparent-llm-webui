@@ -1,0 +1,34 @@
+{% for folder in folders %}
+<div class="folder-item {{ 'active' if folder.id == current_folder_id else '' }}"
+     data-folder-id="{{ folder.id }}">
+  <div class="folder-row">
+    <span class="folder-name">{{ folder.name }}</span>
+    <span class="folder-actions">
+      <button class="btn-mini"
+              hx-post="/folders/{{ folder.id }}/delete"
+              hx-target="#folder-list"
+              hx-swap="innerHTML"
+              hx-confirm="Delete this folder and all its chats?">×</button>
+    </span>
+  </div>
+  <details class="folder-edit">
+    <summary>Edit</summary>
+    <form hx-post="/folders/{{ folder.id }}/update"
+          hx-target="#folder-list"
+          hx-swap="innerHTML">
+      <input type="hidden" name="active_session_id" value="{{ current_session_id or '' }}">
+      <input type="text" name="name" value="{{ folder.name }}" placeholder="Folder name">
+      <textarea name="system_prompt" rows="3" placeholder="System prompt (visible to you)">{{ folder.system_prompt }}</textarea>
+      <button class="btn" type="submit">Save</button>
+    </form>
+  </details>
+  <div class="session-list">
+    {% with sessions=folder.sessions, current_session_id=current_session_id %}
+    {% include "_session_list.html" %}
+    {% endwith %}
+  </div>
+</div>
+{% endfor %}
+{% if not folders %}
+<p class="muted">No folders yet. Create one to start.</p>
+{% endif %}

@@ -1,0 +1,35 @@
+{% if session %}
+{% set params = session.params_json | from_json %}
+{% set ctx = chat_context(session) %}
+{% set messages = chat_messages(session.id) %}
+<div class="chat-header">
+  <div class="chat-title">
+    <form hx-post="/sessions/{{ session.id }}/rename"
+          hx-target="#folder-list"
+          hx-swap="innerHTML"
+          class="inline-form">
+      <input type="text" name="title" value="{{ session.title }}" class="title-input">
+    </form>
+  </div>
+  {% with models=ctx.models, usage=ctx.usage %}
+  {% include "_model_selector.html" %}
+  {% endwith %}
+  {% with ctx_cap=ctx.ctx_cap %}
+  {% include "_params_panel.html" %}
+  {% endwith %}
+</div>
+{% include "_system_prompt.html" %}
+<div id="message-list" class="message-list">
+  {% include "_chat_messages.html" %}
+</div>
+<form class="composer" hx-post="/sessions/{{ session.id }}/send"
+      hx-target="#message-list" hx-swap="beforeend"
+      hx-disabled-elt="find button[type=submit]">
+  <textarea name="content" rows="2" placeholder="Message…" required></textarea>
+  <button type="submit" class="btn">Send</button>
+</form>
+{% else %}
+<div class="empty-state">
+  <p>Select a chat, or create a folder and a new chat to begin.</p>
+</div>
+{% endif %}

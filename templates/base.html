@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Simple AI Chat{% endblock %}</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/htmx.min.js"></script>
+  <script src="/static/sse.js"></script>
+</head>
+<body hx-ext="sse">
+<script>
+  // Keep the latest message visible: scroll the message list to bottom
+  // after any swap into it, and on initial load.
+  document.body.addEventListener('htmx:afterSwap', function (evt) {
+    var t = evt.detail && evt.detail.target;
+    if (t && t.id === 'message-list') {
+      t.scrollTop = t.scrollHeight;
+    }
+  });
+  document.body.addEventListener('htmx:sseMessage', function (evt) {
+    var elt = evt.target;
+    var list = elt && elt.closest ? elt.closest('#message-list') : null;
+    if (list) { list.scrollTop = list.scrollHeight; }
+  });
+  // Clear the composer after a successful send; keep the draft when the
+  // request fails (network error or non-2xx) so it can be retried.
+  document.body.addEventListener('htmx:afterRequest', function (evt) {
+    if (evt.detail.successful && evt.target.matches('form.composer')) {
+      var ta = evt.target.querySelector('textarea[name="content"]');
+      if (ta) { ta.value = ''; }
+    }
+  });
+  document.addEventListener('DOMContentLoaded', function () {
+    var list = document.getElementById('message-list');
+    if (list) { list.scrollTop = list.scrollHeight; }
+  });
+</script>
+{% block body %}{% endblock %}
+</body>
+</html>

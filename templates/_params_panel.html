@@ -28,7 +28,7 @@
   </div>
   <div class="param-row">
     <label>Max tokens
-      <input type="number" name="max_tokens" min="1" max="8192"
+      <input type="number" name="max_tokens" min="1" max="{{ ctx_cap }}"
              value="{{ params.get('max_tokens', 1024) }}">
     </label>
   </div>

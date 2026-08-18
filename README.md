@@ -1,4 +1,4 @@
-# Simple AI Chat
+# transparent-llm-webui
 
 Minimal single-user internal AI chat app. FastAPI + htmx 2.0 (SSE streaming) + SQLite, chatting with Ollama Cloud (`https://ollama.com`). No login, no build step, no JS framework.
 
@@ -12,7 +12,7 @@ Minimal single-user internal AI chat app. FastAPI + htmx 2.0 (SSE streaming) + S
 ## Setup
 
 ```bash
-cd /home/plase1/prog/ollama-webui
+cd transparent-llm-webui
 uv sync
 ```
 

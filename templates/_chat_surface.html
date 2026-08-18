@@ -14,9 +14,12 @@
   {% with models=ctx.models, usage=ctx.usage, ctx_cap=ctx.ctx_cap %}
   {% include "_model_selector.html" %}
   {% endwith %}
-  {% with ctx_cap=ctx.ctx_cap %}
-  {% include "_params_panel.html" %}
-  {% endwith %}
+  <details class="params-toggle" open>
+    <summary>Parameters</summary>
+    {% with ctx_cap=ctx.ctx_cap %}
+    {% include "_params_panel.html" %}
+    {% endwith %}
+  </details>
 </div>
 {% include "_system_prompt.html" %}
 <div id="message-list" class="message-list">

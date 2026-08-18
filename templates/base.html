@@ -10,12 +10,45 @@
 </head>
 <body hx-ext="sse">
 <script>
+  // Parameters fold: collapsed on phones, expanded on larger screens.
+  // The template renders it open; sync to the viewport so mobile starts
+  // folded and desktop keeps the full panel. Re-run after chat-surface
+  // swaps, which re-create the details element.
+  function syncParamsToggle() {
+    var paramsToggle = document.querySelector('.params-toggle');
+    if (!paramsToggle) { return; }
+    var mobile = window.matchMedia('(max-width: 640px)').matches;
+    if (mobile) {
+      paramsToggle.removeAttribute('open');
+    } else {
+      paramsToggle.setAttribute('open', '');
+    }
+  }
   // Keep the latest message visible: scroll the message list to bottom
   // after any swap into it, and on initial load.
+  document.body.addEventListener('htmx:oobAfterSwap', function (evt) {
+    // OOB swaps (e.g. the chat surface returned by + New chat) fire
+    // htmx:oobAfterSwap on the swapped element, not htmx:afterSwap.
+    var t = evt.target;
+    if (t && t.id === 'chat-surface') {
+      var layout = document.querySelector('.layout');
+      if (layout) { layout.classList.remove('nav-open'); }
+      var btn = document.querySelector('.menu-btn');
+      if (btn) { btn.setAttribute('aria-expanded', 'false'); }
+      syncParamsToggle();
+    }
+  });
   document.body.addEventListener('htmx:afterSwap', function (evt) {
     var t = evt.detail && evt.detail.target;
     if (t && t.id === 'message-list') {
       t.scrollTop = t.scrollHeight;
+    } else if (t && t.id === 'chat-surface') {
+      // A session was selected (or created): close the mobile drawer.
+      var layout = document.querySelector('.layout');
+      if (layout) { layout.classList.remove('nav-open'); }
+      var btn = document.querySelector('.menu-btn');
+      if (btn) { btn.setAttribute('aria-expanded', 'false'); }
+      syncParamsToggle();
     }
   });
   document.body.addEventListener('htmx:sseMessage', function (evt) {
@@ -34,6 +67,33 @@
   document.addEventListener('DOMContentLoaded', function () {
     var list = document.getElementById('message-list');
     if (list) { list.scrollTop = list.scrollHeight; }
+
+    // Mobile drawer: hamburger toggles, scrim and Escape close.
+    var layout = document.querySelector('.layout');
+    var menuBtn = document.querySelector('.menu-btn');
+    var scrim = document.querySelector('.scrim');
+    if (layout && menuBtn) {
+      menuBtn.addEventListener('click', function () {
+        var open = layout.classList.toggle('nav-open');
+        menuBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+      });
+    }
+    if (layout && scrim) {
+      scrim.addEventListener('click', function () {
+        layout.classList.remove('nav-open');
+        if (menuBtn) { menuBtn.setAttribute('aria-expanded', 'false'); }
+      });
+    }
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && layout && layout.classList.contains('nav-open')) {
+        layout.classList.remove('nav-open');
+        if (menuBtn) { menuBtn.setAttribute('aria-expanded', 'false'); }
+      }
+    });
+
+    // Parameters fold: sync to viewport (function defined above).
+    syncParamsToggle();
+    window.addEventListener('resize', syncParamsToggle);
   });
 </script>
 {% block body %}{% endblock %}

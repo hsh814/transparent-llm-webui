@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block body %}
 <div class="layout">
+  <button class="menu-btn" type="button" aria-label="Toggle chats" aria-expanded="false">☰</button>
   <aside class="sidebar">
     <div class="sidebar-header">
       <h1>Simple AI Chat</h1>
@@ -22,5 +23,6 @@
       {% include "_chat_surface.html" %}
     </div>
   </main>
+  <div class="scrim" aria-hidden="true"></div>
 </div>
 {% endblock %}

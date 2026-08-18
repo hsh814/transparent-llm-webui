@@ -11,6 +11,11 @@
       {% endfor %}
     </select>
   </label>
+  <button type="button" class="btn-refresh"
+          hx-post="/sessions/{{ session.id }}/model/refresh"
+          hx-target="#model-selector"
+          hx-swap="outerHTML"
+          title="Re-fetch model list and context length from Ollama">Refresh</button>
   {# carry current params so a model change preserves them #}
   <input type="hidden" name="reasoning_effort" value="{{ params.get('reasoning_effort', 'low') }}">
   <input type="hidden" name="temperature" value="{{ params.get('temperature', 0.7) }}">

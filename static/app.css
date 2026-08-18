@@ -313,6 +313,19 @@ body {
 
 .btn-mini:hover { border-color: var(--danger); color: var(--danger); }
 
+.btn-refresh {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 1px 8px;
+  align-self: flex-end;
+}
+
+.btn-refresh:hover { border-color: var(--accent); color: var(--accent); }
+
 input[type="text"], input[type="number"], select, textarea {
   border: 1px solid var(--border);
   border-radius: 6px;

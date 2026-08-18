@@ -9,7 +9,6 @@ Auth: `Authorization: Bearer $OLLAMA_API_KEY`.
 
 import json
 import os
-import time
 from typing import Iterator
 
 import httpx
@@ -19,19 +18,22 @@ OPENAI_BASE = os.environ.get("OLLAMA_OPENAI_BASE_URL", "https://ollama.com/v1")
 
 TIMEOUT = httpx.Timeout(120.0, connect=20.0)
 
-_CACHE: dict[str, tuple[float, object]] = {}
-_CACHE_TTL = 300.0
+_CACHE: dict[str, object] = {}
 
 
 def _cache_get(key: str) -> tuple[bool, object]:
-    entry = _CACHE.get(key)
-    if entry is None or time.monotonic() - entry[0] > _CACHE_TTL:
-        return False, None
-    return True, entry[1]
+    if key in _CACHE:
+        return True, _CACHE[key]
+    return False, None
 
 
 def _cache_set(key: str, value: object) -> None:
-    _CACHE[key] = (time.monotonic(), value)
+    _CACHE[key] = value
+
+
+def clear_cache() -> None:
+    """Drop all cached values; next call re-fetches from Ollama."""
+    _CACHE.clear()
 
 
 def _headers() -> dict:

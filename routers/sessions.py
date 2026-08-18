@@ -87,6 +87,40 @@ def update_model_params(
     panel = templating.templates.env.get_template("_params_panel.html").render(
         session=session, params=params, ctx_cap=ctx_cap
     )
+    panel = panel.replace(
+        '<form class="params-panel" id="params-panel"',
+        '<form class="params-panel" id="params-panel" hx-swap-oob="true"',
+        1,
+    )
+    return HTMLResponse(selector + panel)
+
+
+@router.post("/sessions/{session_id}/model/refresh", response_class=HTMLResponse)
+def refresh_model_cache(request: Request, session_id: int):
+    session = db.get_session(session_id)
+    if session is None:
+        return HTMLResponse("", status_code=404)
+    ollama.clear_cache()
+    try:
+        models = ollama.list_models()
+    except Exception:
+        models = [session["model"]]
+    try:
+        ctx_cap = ollama.model_context_length(session["model"]) or 8192
+    except Exception:
+        ctx_cap = 8192
+    params = json.loads(session["params_json"] or "{}")
+    selector = templating.templates.env.get_template("_model_selector.html").render(
+        session=session, models=models, params=params, usage=db.model_usage()
+    )
+    panel = templating.templates.env.get_template("_params_panel.html").render(
+        session=session, params=params, ctx_cap=ctx_cap
+    )
+    panel = panel.replace(
+        '<form class="params-panel" id="params-panel"',
+        '<form class="params-panel" id="params-panel" hx-swap-oob="true"',
+        1,
+    )
     return HTMLResponse(selector + panel)
 
 

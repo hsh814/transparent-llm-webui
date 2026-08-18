@@ -29,7 +29,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   model TEXT NOT NULL DEFAULT 'gemma4:31b',
   params_json TEXT NOT NULL DEFAULT '{}',
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  params_updated_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -48,8 +49,7 @@ DEFAULT_PARAMS = {
     "reasoning_effort": "low",
     "temperature": 0.7,
     "top_p": 0.9,
-    "max_tokens": 1024,
-    "num_ctx": 8192,
+    "max_tokens": 8192,
     "top_k": 40,
     "repeat_penalty": 1.1,
     "seed": None,
@@ -69,6 +69,9 @@ def init_db() -> None:
     with _lock:
         conn = _get_conn()
         conn.executescript(SCHEMA)
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(sessions)")}
+        if "params_updated_at" not in cols:
+            conn.execute("ALTER TABLE sessions ADD COLUMN params_updated_at TEXT")
         conn.commit()
 
 
@@ -164,14 +167,27 @@ def default_model() -> str:
     return max(usage, key=usage.get)
 
 
+def last_params_session(folder_id: int) -> dict | None:
+    """Most recent session in the folder whose params were edited, or None."""
+    with _lock:
+        row = _get_conn().execute(
+            "SELECT * FROM sessions WHERE folder_id = ? AND params_updated_at IS NOT NULL"
+            " ORDER BY params_updated_at DESC, id DESC LIMIT 1",
+            (folder_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
 def create_session(
     folder_id: int, title: str = "New Chat", model: str | None = None,
     params_json: str | None = None,
 ) -> dict:
+    if model is None or params_json is None:
+        src = last_params_session(folder_id)
     if model is None:
-        model = default_model()
+        model = src["model"] if src is not None else default_model()
     if params_json is None:
-        params_json = json.dumps(DEFAULT_PARAMS)
+        params_json = src["params_json"] if src is not None else json.dumps(DEFAULT_PARAMS)
     with _lock:
         cur = _get_conn().execute(
             "INSERT INTO sessions (folder_id, title, model, params_json) VALUES (?, ?, ?, ?)",

@@ -1,6 +1,7 @@
 """Session routes: create, rename, delete, model/params, chat surface."""
 
 import json
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse
@@ -71,7 +72,10 @@ def update_model_params(
         "repeat_penalty": repeat_penalty,
         "seed": int(seed) if seed.strip() else None,
     }
-    db.update_session(session_id, model=model, params_json=json.dumps(params))
+    db.update_session(
+        session_id, model=model, params_json=json.dumps(params),
+        params_updated_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+    )
     session = db.get_session(session_id)
     try:
         models = ollama.list_models()
@@ -82,7 +86,8 @@ def update_model_params(
     except Exception:
         ctx_cap = 8192
     selector = templating.templates.env.get_template("_model_selector.html").render(
-        session=session, models=models, params=params, usage=db.model_usage()
+        session=session, models=models, params=params, usage=db.model_usage(),
+        ctx_cap=ctx_cap,
     )
     panel = templating.templates.env.get_template("_params_panel.html").render(
         session=session, params=params, ctx_cap=ctx_cap
@@ -111,7 +116,8 @@ def refresh_model_cache(request: Request, session_id: int):
         ctx_cap = 8192
     params = json.loads(session["params_json"] or "{}")
     selector = templating.templates.env.get_template("_model_selector.html").render(
-        session=session, models=models, params=params, usage=db.model_usage()
+        session=session, models=models, params=params, usage=db.model_usage(),
+        ctx_cap=ctx_cap,
     )
     panel = templating.templates.env.get_template("_params_panel.html").render(
         session=session, params=params, ctx_cap=ctx_cap

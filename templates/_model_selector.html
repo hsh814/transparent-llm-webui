@@ -21,7 +21,7 @@
   <input type="hidden" name="temperature" value="{{ params.get('temperature', 0.7) }}">
   <input type="hidden" name="top_p" value="{{ params.get('top_p', 0.9) }}">
   <input type="hidden" name="max_tokens" value="{{ params.get('max_tokens', 1024) }}">
-  <input type="hidden" name="num_ctx" value="{{ params.get('num_ctx', 8192) }}">
+  <input type="hidden" name="num_ctx" value="{{ ctx_cap }}">
   <input type="hidden" name="top_k" value="{{ params.get('top_k', 40) }}">
   <input type="hidden" name="repeat_penalty" value="{{ params.get('repeat_penalty', 1.1) }}">
   <input type="hidden" name="seed" value="{{ params.get('seed', '') if params.get('seed') is not none else '' }}">

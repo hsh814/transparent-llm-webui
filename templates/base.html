@@ -92,18 +92,57 @@
     });
 
     // Parameters fold: sync to viewport (function defined above).
-    syncParamsToggle();
-    window.addEventListener('resize', syncParamsToggle);
-
-    // Copy all: delegated so it survives htmx swaps of #chat-surface.
+    // Copy buttons: delegated so they survive htmx swaps of #chat-surface
+    // and #message-list.
     document.body.addEventListener('click', function (evt) {
-      var btn = evt.target.closest('#copy-all-btn');
-      if (!btn) return;
-      var msgs = document.querySelectorAll('#message-list .message .content');
-      var text = Array.from(msgs).map(function (el) { return el.textContent; }).join('\n\n');
-      navigator.clipboard.writeText(text);
+      // Copy-all button (chat header).
+      var allBtn = evt.target.closest('#copy-all-btn');
+      if (allBtn) {
+        var msgs = document.querySelectorAll('#message-list .message .content');
+        var text = Array.from(msgs).map(function (el) { return el.textContent; }).join('\n\n');
+        copyText(text, allBtn);
+        return;
+      }
+      // Per-message Copy button. The message content is carried as JSON in
+      // data-copy (tojson keeps newlines as \n, so HTML attribute whitespace
+      // collapse cannot lose them); parse it back to the exact string.
+      var btn = evt.target.closest('.btn-copy');
+      if (btn) {
+        copyText(JSON.parse(btn.dataset.copy), btn);
+      }
     });
   });
+
+  // Copy text to the clipboard with a graceful fallback for non-secure
+  // contexts (plain HTTP / LAN IPs) where navigator.clipboard is undefined,
+  // and brief visual feedback on the triggering button.
+  function copyText(text, btn) {
+    var done = function () {
+      if (!btn) { return; }
+      var orig = btn.dataset.orig || (btn.dataset.orig = btn.textContent);
+      btn.textContent = 'Copied!';
+      clearTimeout(btn._copyTimer);
+      btn._copyTimer = setTimeout(function () { btn.textContent = orig; }, 1200);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done).catch(function () { fallback(text, done); });
+    } else {
+      fallback(text, done);
+    }
+  }
+  // Legacy fallback: hidden textarea + execCommand('copy').
+  function fallback(text, done) {
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.top = '-1000px';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); } catch (e) {}
+    document.body.removeChild(ta);
+    done();
+  }
 </script>
 {% block body %}{% endblock %}
 </body>

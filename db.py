@@ -47,11 +47,11 @@ CREATE TABLE IF NOT EXISTS messages (
 
 DEFAULT_PARAMS = {
     "reasoning_effort": "low",
-    "temperature": 0.7,
+    "temperature": 0.95,
     "top_p": 0.9,
-    "max_tokens": 8192,
+    "max_tokens": 65535,
     "top_k": 40,
-    "repeat_penalty": 1.1,
+    "repeat_penalty": 1.0,
     "seed": None,
 }
 

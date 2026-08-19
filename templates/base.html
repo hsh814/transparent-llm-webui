@@ -95,6 +95,24 @@
     // Copy buttons: delegated so they survive htmx swaps of #chat-surface
     // and #message-list.
     document.body.addEventListener('click', function (evt) {
+      // Folder hamburger dropdown: toggle the menu, close others; clicking
+      // anywhere else closes all open menus.
+      var menuBtn = evt.target.closest('.folder-menu-btn');
+      if (menuBtn) {
+        var menu = menuBtn.parentElement.querySelector('.folder-menu');
+        if (menu) {
+          document.querySelectorAll('.folder-menu.open').forEach(function (m) {
+            if (m !== menu) { m.classList.remove('open'); }
+          });
+          menu.classList.toggle('open');
+        }
+        return;
+      }
+      if (!evt.target.closest('.folder-menu-wrapper')) {
+        document.querySelectorAll('.folder-menu.open').forEach(function (m) {
+          m.classList.remove('open');
+        });
+      }
       // Copy-all button (chat header).
       var allBtn = evt.target.closest('#copy-all-btn');
       if (allBtn) {

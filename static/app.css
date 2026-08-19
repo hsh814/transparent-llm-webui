@@ -67,7 +67,36 @@ body {
   gap: 6px;
 }
 
-.folder-name { font-weight: 600; }
+.folder-name {
+  font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.type-badge {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border-radius: 999px;
+  padding: 1px 7px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.type-memo {
+  background: #f0f0f2;
+  color: var(--muted);
+  border: 1px solid var(--border);
+}
+
+.type-translation {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border: 1px solid #c9d4fd;
+}
 
 .folder-actions { display: flex; gap: 4px; }
 
@@ -121,6 +150,46 @@ body {
 .show-all { margin-top: 2px; width: 100%; }
 
 .pin-toggle:hover { border-color: var(--accent); color: var(--accent); }
+
+/* --- folder hamburger dropdown --- */
+.folder-menu-wrapper { position: relative; display: inline-flex; }
+.folder-menu {
+  display: none;
+  position: absolute;
+  right: 0;
+  top: 100%;
+  z-index: 20;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+  min-width: 150px;
+  padding: 4px;
+}
+.folder-menu.open { display: block; }
+.folder-menu button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: transparent;
+  padding: 6px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.folder-menu button:hover:not(:disabled) { background: var(--accent-soft); }
+.folder-menu button:disabled { opacity: 0.4; cursor: default; }
+.folder-menu hr { border: none; border-top: 1px solid var(--border); margin: 4px 0; }
+.folder-menu .danger { color: var(--danger); }
+.folder-menu .danger:hover { background: #fdeaea; }
+.chunk-limit-label { font-size: 13px; color: var(--muted); }
+.chunk-limit-label input { margin-top: 2px; }
+.message.pending .content { color: var(--muted); font-style: italic; }
+.message.pending .content::after {
+  content: ' ⋯';
+  animation: blink 1s infinite;
+}
 
 /* --- main chat surface --- */
 

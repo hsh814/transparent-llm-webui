@@ -38,11 +38,12 @@ Open `http://localhost:8000`. Single-user, no auth — do not expose on a public
 
 ## Usage
 
-1. **+ Folder** — create a folder; open **Edit** to name it and set its system prompt.
+1. **+ Folder** — create a folder; the **⋮** menu converts it to **Chat / Memo / Translation** or deletes it; open **Edit** to name it, set its system prompt, and (for translation folders) the chunk char limit.
 2. **+ New chat** — creates a session in the folder.
 3. Pick the model in the header dropdown; adjust params and hit **Apply**.
 4. Type a message and **Send**. The assistant's thinking and answer stream in; the model + effort badge is stamped on the bubble.
-5. In the **Memo** folder, the composer **Save** button stores a note — memo messages are displayed but never sent to a model.
+5. In a **Memo** folder, the composer **Save** button stores a note — memo messages are displayed but never sent to a model.
+6. In a **Translation** folder, the composer **Translate** button splits the input by line/punctuation into chunks of at most the folder's chunk char limit. Each chunk is translated independently (system prompt + chunk only, no conversation history) and the results appear sequentially as separate bubbles.
 
 Changing the model mid-chat only affects subsequent messages — past badges stay accurate.
 
@@ -90,9 +91,10 @@ The folder row is the source of truth. On each send, the prompt is mirrored into
 |---|---|---|
 | GET | `/` | Full page |
 | POST | `/folders` | Create folder (form: `name`, `system_prompt`) |
-| POST | `/folders/{id}/update` | Update folder (form: `name`, `system_prompt`, `active_session_id`) |
+| POST | `/folders/{id}/update` | Update folder (form: `name`, `system_prompt`, `chunk_limit`, `active_session_id`) |
 | POST | `/folders/{id}/delete` | Delete folder + cascade |
 | POST | `/folders/{id}/pin` | Toggle folder pin (sidebar order) |
+| POST | `/folders/{id}/convert` | Convert folder type (form: `folder_type` ∈ chat/memo/translation) |
 | GET | `/folders/{id}/system-prompt` | System-prompt partial |
 | POST | `/folders/{folder_id}/sessions` | Create session |
 | POST | `/sessions/{id}/rename` | Rename (form: `title`) |
@@ -100,8 +102,9 @@ The folder row is the source of truth. On each send, the prompt is mirrored into
 | POST | `/sessions/{id}/model` | Update model + params (form fields) |
 | POST | `/sessions/{id}/model/refresh` | Clear model cache, re-fetch models + ctx cap |
 | GET | `/sessions/{id}` | Chat surface fragment |
-| POST | `/sessions/{id}/send` | Send message → bubbles HTML |
-| POST | `/sessions/{id}/memo` | Save memo (Memo folder only, 403 otherwise) |
+| POST | `/sessions/{id}/send` | Send message → bubbles HTML (chat: + SSE stream bubble; translation: chunked user bubbles + pending translate bubble) |
+| POST | `/sessions/{id}/translate` | Translate one chunk (form: `user_message_id`); returns finalized bubble + next pending bubble |
+| POST | `/sessions/{id}/memo` | Save memo (memo folders only, 403 otherwise) |
 | GET | `/sessions/{id}/stream?since=` | SSE stream (EventSource) |
 | POST | `/sessions/{id}/messages/{mid}/delete` | Delete message |
 | GET | `/sessions/{id}/messages` | Message history partial |

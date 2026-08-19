@@ -1,0 +1,11 @@
+<div class="message assistant pending" id="translate-next"
+     hx-trigger="load"
+     hx-post="/sessions/{{ session.id }}/translate"
+     hx-vals='{"user_message_id": "{{ user_message_id }}"}'
+     hx-target="#translate-next"
+     hx-swap="outerHTML">
+  <div class="message-meta">
+    <span class="role-label">assistant</span>
+  </div>
+  <div class="content muted">Translating…</div>
+</div>

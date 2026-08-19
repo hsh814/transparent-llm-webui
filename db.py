@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS folders (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,
   system_prompt TEXT NOT NULL DEFAULT '',
-  is_memo INTEGER NOT NULL DEFAULT 0,
+  type TEXT NOT NULL DEFAULT 'chat',
+  chunk_limit INTEGER,
   pinned INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -78,19 +79,15 @@ def init_db() -> None:
         if "params_updated_at" not in cols:
             conn.execute("ALTER TABLE sessions ADD COLUMN params_updated_at TEXT")
         folder_cols = {row["name"] for row in conn.execute("PRAGMA table_info(folders)")}
-        if "is_memo" not in folder_cols:
-            conn.execute("ALTER TABLE folders ADD COLUMN is_memo INTEGER NOT NULL DEFAULT 0")
+        if "type" not in folder_cols:
+            conn.execute("ALTER TABLE folders ADD COLUMN type TEXT NOT NULL DEFAULT 'chat'")
+            if "is_memo" in folder_cols:
+                conn.execute("UPDATE folders SET type = 'memo' WHERE is_memo = 1")
+                conn.execute("ALTER TABLE folders DROP COLUMN is_memo")
+        if "chunk_limit" not in folder_cols:
+            conn.execute("ALTER TABLE folders ADD COLUMN chunk_limit INTEGER")
         if "pinned" not in folder_cols:
             conn.execute("ALTER TABLE folders ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
-        if (
-            conn.execute(
-                "SELECT id FROM folders WHERE is_memo = 1 ORDER BY id LIMIT 1"
-            ).fetchone()
-            is None
-        ):
-            conn.execute(
-                "INSERT INTO folders (name, system_prompt, is_memo) VALUES ('Memo', '', 1)"
-            )
         msg_cols = {row["name"] for row in conn.execute("PRAGMA table_info(messages)")}
         for col in ("prompt_tokens", "completion_tokens", "total_tokens"):
             if col not in msg_cols:
@@ -125,19 +122,12 @@ def get_folder(folder_id: int) -> dict | None:
     return dict(row) if row else None
 
 
-def get_memo_folder() -> dict | None:
-    with _lock:
-        row = _get_conn().execute(
-            "SELECT * FROM folders WHERE is_memo = 1 ORDER BY id LIMIT 1"
-        ).fetchone()
-    return dict(row) if row else None
-
-
-def create_folder(name: str, system_prompt: str = "") -> dict:
+def create_folder(name: str, system_prompt: str = "", folder_type: str = "chat",
+                  chunk_limit: int | None = None) -> dict:
     with _lock:
         cur = _get_conn().execute(
-            "INSERT INTO folders (name, system_prompt) VALUES (?, ?)",
-            (name, system_prompt),
+            "INSERT INTO folders (name, system_prompt, type, chunk_limit) VALUES (?, ?, ?, ?)",
+            (name, system_prompt, folder_type, chunk_limit),
         )
         _get_conn().commit()
         row = _get_conn().execute(
@@ -146,11 +136,12 @@ def create_folder(name: str, system_prompt: str = "") -> dict:
     return dict(row)
 
 
-def update_folder(folder_id: int, name: str, system_prompt: str) -> dict | None:
+def update_folder(folder_id: int, name: str, system_prompt: str,
+                  chunk_limit: int | None = None) -> dict | None:
     with _lock:
         _get_conn().execute(
-            "UPDATE folders SET name = ?, system_prompt = ? WHERE id = ?",
-            (name, system_prompt, folder_id),
+            "UPDATE folders SET name = ?, system_prompt = ?, chunk_limit = ? WHERE id = ?",
+            (name, system_prompt, chunk_limit, folder_id),
         )
         _get_conn().commit()
         row = _get_conn().execute(
@@ -169,6 +160,18 @@ def set_folder_pin(folder_id: int, pinned: int) -> dict | None:
     with _lock:
         _get_conn().execute(
             "UPDATE folders SET pinned = ? WHERE id = ?", (pinned, folder_id)
+        )
+        _get_conn().commit()
+        row = _get_conn().execute(
+            "SELECT * FROM folders WHERE id = ?", (folder_id,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def set_folder_type(folder_id: int, folder_type: str) -> dict | None:
+    with _lock:
+        _get_conn().execute(
+            "UPDATE folders SET type = ? WHERE id = ?", (folder_type, folder_id)
         )
         _get_conn().commit()
         row = _get_conn().execute(
@@ -283,6 +286,17 @@ def list_messages(session_id: int) -> list[dict]:
             (session_id,),
         ).fetchall()
     return _rows_to_dicts(rows)
+
+
+def next_user_message(session_id: int, after_message_id: int) -> dict | None:
+    """Next role='user' message by ID after the given one (used by translation chain)."""
+    with _lock:
+        row = _get_conn().execute(
+            "SELECT * FROM messages WHERE session_id = ? AND role = 'user' AND id > ?"
+            " ORDER BY id LIMIT 1",
+            (session_id, after_message_id),
+        ).fetchone()
+    return dict(row) if row else None
 
 
 def add_message(

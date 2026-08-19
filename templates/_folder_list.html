@@ -5,6 +5,11 @@
     <button class="folder-toggle" type="button" aria-expanded="false">
       <span class="folder-chevron">▸</span>
       <span class="folder-name">{{ folder.name }}</span>
+      {% if folder.type == 'memo' %}
+      <span class="type-badge type-memo" title="Memo folder">Memo</span>
+      {% elif folder.type == 'translation' %}
+      <span class="type-badge type-translation" title="Translation folder">Translation</span>
+      {% endif %}
     </button>
     <span class="folder-actions">
       <button class="btn-mini pin-toggle" type="button"
@@ -13,16 +18,41 @@
               hx-post="/folders/{{ folder.id }}/pin"
               hx-target="#folder-list"
               hx-swap="innerHTML">{{ '★' if folder.pinned else '☆' }}</button>
-      {% if not folder.is_memo %}
-      <button class="btn-mini"
-              hx-post="/folders/{{ folder.id }}/delete"
-              hx-target="#folder-list"
-              hx-swap="innerHTML"
-              hx-confirm="Delete this folder and all its chats?">×</button>
-      {% endif %}
+      <div class="folder-menu-wrapper">
+        <button class="btn-mini folder-menu-btn" type="button" title="Folder options">⋮</button>
+        <div class="folder-menu">
+          <input type="hidden" name="active_session_id" value="{{ current_session_id or '' }}">
+          <button type="button"
+                  hx-post="/folders/{{ folder.id }}/convert"
+                  hx-vals='{"folder_type": "chat"}'
+                  hx-include="closest .folder-menu"
+                  hx-target="#folder-list"
+                  hx-swap="innerHTML"
+                  {{ 'disabled' if folder.type == 'chat' else '' }}>Chat</button>
+          <button type="button"
+                  hx-post="/folders/{{ folder.id }}/convert"
+                  hx-vals='{"folder_type": "memo"}'
+                  hx-include="closest .folder-menu"
+                  hx-target="#folder-list"
+                  hx-swap="innerHTML"
+                  {{ 'disabled' if folder.type == 'memo' else '' }}>Memo</button>
+          <button type="button"
+                  hx-post="/folders/{{ folder.id }}/convert"
+                  hx-vals='{"folder_type": "translation"}'
+                  hx-include="closest .folder-menu"
+                  hx-target="#folder-list"
+                  hx-swap="innerHTML"
+                  {{ 'disabled' if folder.type == 'translation' else '' }}>Translation</button>
+          <hr>
+          <button type="button" class="danger"
+                  hx-post="/folders/{{ folder.id }}/delete"
+                  hx-target="#folder-list"
+                  hx-swap="innerHTML"
+                  hx-confirm="Delete this folder and all its chats?">Delete</button>
+        </div>
+      </div>
     </span>
   </div>
-  {% if not folder.is_memo %}
   <details class="folder-edit">
     <summary>Edit</summary>
     <form hx-post="/folders/{{ folder.id }}/update"
@@ -30,11 +60,18 @@
           hx-swap="innerHTML">
       <input type="hidden" name="active_session_id" value="{{ current_session_id or '' }}">
       <input type="text" name="name" value="{{ folder.name }}" placeholder="Folder name">
+      {% if folder.type != 'memo' %}
       <textarea name="system_prompt" rows="3" placeholder="System prompt (visible to you)">{{ folder.system_prompt }}</textarea>
+      {% endif %}
+      {% if folder.type == 'translation' %}
+      <label class="chunk-limit-label">Chunk char limit
+        <input type="number" name="chunk_limit" min="100" max="50000"
+               value="{{ folder.chunk_limit or 1000 }}">
+      </label>
+      {% endif %}
       <button class="btn" type="submit">Save</button>
     </form>
   </details>
-  {% endif %}
   <div class="session-list">
     {% with sessions=folder.sessions, current_session_id=current_session_id %}
     {% include "_session_list.html" %}

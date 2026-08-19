@@ -135,8 +135,8 @@ def chat_stream(model: str, messages: list[dict], params: dict) -> Iterator[dict
             yield {"type": "done", "text": "", "usage": usage}
 
 
-def chat_once(model: str, messages: list[dict], params: dict) -> tuple[str, str | None]:
-    """Non-streaming chat; returns (content, reasoning_or_None)."""
+def chat_once(model: str, messages: list[dict], params: dict) -> tuple[str, str | None, dict | None]:
+    """Non-streaming chat; returns (content, reasoning_or_None, usage_or_None)."""
     payload = _build_payload(model, messages, params)
     payload["stream"] = False
     with _client() as client:
@@ -144,4 +144,4 @@ def chat_once(model: str, messages: list[dict], params: dict) -> tuple[str, str 
         resp.raise_for_status()
         data = resp.json()
     message = (data.get("choices") or [{}])[0].get("message") or {}
-    return message.get("content", ""), message.get("reasoning")
+    return message.get("content", ""), message.get("reasoning"), data.get("usage")

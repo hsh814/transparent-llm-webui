@@ -25,9 +25,10 @@ def update_folder(
     folder_id: int,
     name: str = Form(...),
     system_prompt: str = Form(""),
+    chunk_limit: int | None = Form(None),
     active_session_id: int | None = Form(None),
 ):
-    db.update_folder(folder_id, name.strip() or "Untitled", system_prompt)
+    db.update_folder(folder_id, name.strip() or "Untitled", system_prompt, chunk_limit)
     folder = db.get_folder(folder_id)
     response = templating.folder_list_inner(
         request, current_folder_id=folder_id, current_session_id=active_session_id
@@ -54,6 +55,29 @@ def toggle_pin(request: Request, folder_id: int):
         return HTMLResponse("", status_code=404)
     db.set_folder_pin(folder_id, 0 if folder["pinned"] else 1)
     return templating.folder_list_inner(request, current_folder_id=folder_id)
+
+
+@router.post("/folders/{folder_id}/convert", response_class=HTMLResponse)
+def convert_folder(
+    request: Request,
+    folder_id: int,
+    folder_type: str = Form(...),
+    active_session_id: int | None = Form(None),
+):
+    if folder_type not in ("chat", "memo", "translation"):
+        return HTMLResponse("", status_code=400)
+    db.set_folder_type(folder_id, folder_type)
+    folder = db.get_folder(folder_id)
+    response = templating.folder_list_inner(
+        request, current_folder_id=folder_id, current_session_id=active_session_id
+    )
+    if active_session_id is not None:
+        session = db.get_session(active_session_id)
+        if session is not None and session["folder_id"] == folder_id:
+            response += templating.chat_surface_fragment(
+                request, folder, session, oob=True
+            )
+    return response
 
 
 @router.get("/folders/{folder_id}/system-prompt", response_class=HTMLResponse)

@@ -14,7 +14,7 @@
   </div>
   <button class="btn-mini" type="button" id="copy-all-btn">Copy all</button>
   {% include "_session_usage.html" %}
-  {% if not (folder and folder.is_memo) %}
+  {% if folder and folder.type != 'memo' %}
   {% with models=ctx.models, usage=ctx.usage, ctx_cap=ctx.ctx_cap %}
   {% include "_model_selector.html" %}
   {% endwith %}
@@ -26,18 +26,25 @@
   </details>
   {% endif %}
 </div>
-{% if not (folder and folder.is_memo) %}
+{% if folder and folder.type != 'memo' %}
 {% include "_system_prompt.html" %}
 {% endif %}
 <div id="message-list" class="message-list">
   {% include "_chat_messages.html" %}
 </div>
-{% if folder and folder.is_memo %}
+{% if folder and folder.type == 'memo' %}
 <form class="composer" hx-post="/sessions/{{ session.id }}/memo"
       hx-target="#message-list" hx-swap="beforeend"
       hx-disabled-elt="find button[type=submit]">
   <textarea name="content" rows="2" placeholder="Write a memo…" required></textarea>
   <button type="submit" class="btn">Save</button>
+</form>
+{% elif folder and folder.type == 'translation' %}
+<form class="composer" hx-post="/sessions/{{ session.id }}/send"
+      hx-target="#message-list" hx-swap="beforeend"
+      hx-disabled-elt="find button[type=submit]">
+  <textarea name="content" rows="4" placeholder="Text to translate…" required></textarea>
+  <button type="submit" class="btn">Translate</button>
 </form>
 {% else %}
 <form class="composer" hx-post="/sessions/{{ session.id }}/send"

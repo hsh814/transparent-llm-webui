@@ -7,6 +7,10 @@ Minimal single-user internal AI chat app. FastAPI + htmx 2.0 (SSE streaming) + S
 - Folders with an optional **system prompt** — always visible in the UI (open `<details>` block), never injected invisibly. The exact text shown is what the model receives.
 - Per-chat model choice + generation params (reasoning effort, temperature, top_p, max_tokens, num_ctx, top_k, repeat_penalty, seed), persisted per session and shown as a badge on every assistant message.
 - Token streaming over SSE: thinking text fills a "Thinking" region, then the answer streams in.
+- Token usage tracking: per-message token badges (prompt/completion/total) and a running session total in the chat header.
+- Copy buttons: per message and **Copy all** in the header.
+- A built-in **Memo** folder for quick notes — saved per chat, shown like messages, never sent to a model.
+- Folders can be **pinned** to the top of the sidebar.
 - SQLite storage (stdlib `sqlite3`, no ORM).
 
 ## Setup
@@ -38,6 +42,7 @@ Open `http://localhost:8000`. Single-user, no auth — do not expose on a public
 2. **+ New chat** — creates a session in the folder.
 3. Pick the model in the header dropdown; adjust params and hit **Apply**.
 4. Type a message and **Send**. The assistant's thinking and answer stream in; the model + effort badge is stamped on the bubble.
+5. In the **Memo** folder, the composer **Save** button stores a note — memo messages are displayed but never sent to a model.
 
 Changing the model mid-chat only affects subsequent messages — past badges stay accurate.
 
@@ -54,12 +59,12 @@ Changing the model mid-chat only affects subsequent messages — past badges sta
 ```
 app.py            FastAPI app: env load, static mount, router includes, GET /
 db.py             SQLite schema + access functions (single connection + lock)
-ollama.py         Typed client over Ollama Cloud (list_models, chat_stream, chat_once)
+ollama.py         Typed client over Ollama Cloud (list_models, chat_stream, chat_once, cached)
 templating.py     Jinja2 env + shared fragment helpers and globals
 routers/
-  folders.py      Folder CRUD + system-prompt partial
-  sessions.py     Session create/rename/delete, model+params update, chat surface
-  chat.py         Send (POST), SSE stream (GET), message delete, history refresh
+  folders.py      Folder CRUD, pin, system-prompt partial
+  sessions.py     Session create/rename/delete, model+params update, model refresh, chat surface
+  chat.py         Send (POST), SSE stream (GET), memo (POST), message delete, history refresh
 templates/        Jinja2: base, index, chat surface, partials
 static/           htmx.min.js, sse.js (vendored), app.css
 chat.db           SQLite database (created on first boot, gitignored)
@@ -87,18 +92,21 @@ The folder row is the source of truth. On each send, the prompt is mirrored into
 | POST | `/folders` | Create folder (form: `name`, `system_prompt`) |
 | POST | `/folders/{id}/update` | Update folder (form: `name`, `system_prompt`, `active_session_id`) |
 | POST | `/folders/{id}/delete` | Delete folder + cascade |
+| POST | `/folders/{id}/pin` | Toggle folder pin (sidebar order) |
 | GET | `/folders/{id}/system-prompt` | System-prompt partial |
 | POST | `/folders/{folder_id}/sessions` | Create session |
 | POST | `/sessions/{id}/rename` | Rename (form: `title`) |
 | POST | `/sessions/{id}/delete` | Delete session + cascade |
 | POST | `/sessions/{id}/model` | Update model + params (form fields) |
+| POST | `/sessions/{id}/model/refresh` | Clear model cache, re-fetch models + ctx cap |
 | GET | `/sessions/{id}` | Chat surface fragment |
 | POST | `/sessions/{id}/send` | Send message → bubbles HTML |
+| POST | `/sessions/{id}/memo` | Save memo (Memo folder only, 403 otherwise) |
 | GET | `/sessions/{id}/stream?since=` | SSE stream (EventSource) |
 | POST | `/sessions/{id}/messages/{mid}/delete` | Delete message |
 | GET | `/sessions/{id}/messages` | Message history partial |
 
 ## Notes
 
-- The default model constant is `gemma4:31b`; the model dropdown is populated live from `GET /v1/models`, so the app degrades gracefully if a model disappears.
+- New sessions inherit the model and params of the most recently edited session in the folder; the schema default is `gemma4:31b`. The model dropdown is populated live from `GET /v1/models` (cached in memory, refreshable via the model selector's Refresh button), so the app degrades gracefully if a model disappears.
 - SQLite is accessed under a single module-level connection guarded by a lock — adequate for single-user use.

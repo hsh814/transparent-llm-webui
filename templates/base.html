@@ -110,6 +110,32 @@
       if (btn) {
         copyText(JSON.parse(btn.dataset.copy), btn);
       }
+      // Folder fold: toggle name -> top-10 view, Show all -> everything.
+      // Delegated on body so freshly swapped #folder-list content works.
+      var toggle = evt.target.closest('.folder-toggle');
+      if (toggle) {
+        var item = toggle.closest('.folder-item');
+        if (item) {
+          var open = !item.classList.contains('is-open');
+          item.classList.toggle('is-open', open);
+          if (!open) {
+            item.classList.remove('is-all');
+            var sa = item.querySelector('.show-all');
+            if (sa) { sa.textContent = 'Show all (' + sa.dataset.count + ')'; }
+          }
+          toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+        }
+        return;
+      }
+      var showAll = evt.target.closest('.show-all');
+      if (showAll) {
+        var item = showAll.closest('.folder-item');
+        if (item) {
+          var all = item.classList.toggle('is-all');
+          showAll.textContent = all ? 'Show less' : ('Show all (' + showAll.dataset.count + ')');
+        }
+        return;
+      }
     });
   });
 

@@ -2,7 +2,10 @@
 <div class="folder-item {{ 'active' if folder.id == current_folder_id else '' }}"
      data-folder-id="{{ folder.id }}">
   <div class="folder-row">
-    <span class="folder-name">{{ folder.name }}</span>
+    <button class="folder-toggle" type="button" aria-expanded="false">
+      <span class="folder-chevron">▸</span>
+      <span class="folder-name">{{ folder.name }}</span>
+    </button>
     <span class="folder-actions">
       {% if not folder.is_memo %}
       <button class="btn-mini"

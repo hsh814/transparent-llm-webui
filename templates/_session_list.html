@@ -1,17 +1,23 @@
-{% for session in sessions %}
-<div class="session-item {{ 'active' if session.id == current_session_id else '' }}">
-  <a href="/sessions/{{ session.id }}"
-     hx-get="/sessions/{{ session.id }}"
-     hx-target="#chat-surface"
-     hx-swap="outerHTML"
-     class="session-link">{{ session.title }}</a>
-  <button class="btn-mini"
-          hx-post="/sessions/{{ session.id }}/delete"
-          hx-target="#folder-list"
-          hx-swap="innerHTML"
-          hx-confirm="Delete this chat?">×</button>
+<div class="session-items">
+  {% for session in sessions %}
+  <div class="session-item {{ 'active' if session.id == current_session_id else '' }}">
+    <a href="/sessions/{{ session.id }}"
+       hx-get="/sessions/{{ session.id }}"
+       hx-target="#chat-surface"
+       hx-swap="outerHTML"
+       class="session-link">{{ session.title }}</a>
+    <button class="btn-mini"
+            hx-post="/sessions/{{ session.id }}/delete"
+            hx-target="#folder-list"
+            hx-swap="innerHTML"
+            hx-confirm="Delete this chat?">×</button>
+  </div>
+  {% endfor %}
 </div>
-{% endfor %}
+{% if sessions|length > 10 %}
+<button class="btn-mini show-all" type="button"
+        data-count="{{ sessions|length }}">Show all ({{ sessions|length }})</button>
+{% endif %}
 <button class="btn-mini new-chat"
         hx-post="/folders/{{ folder.id }}/sessions"
         hx-target="#folder-list"

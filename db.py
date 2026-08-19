@@ -77,6 +77,8 @@ def init_db() -> None:
         if "params_updated_at" not in cols:
             conn.execute("ALTER TABLE sessions ADD COLUMN params_updated_at TEXT")
         folder_cols = {row["name"] for row in conn.execute("PRAGMA table_info(folders)")}
+        if "is_memo" not in folder_cols:
+            conn.execute("ALTER TABLE folders ADD COLUMN is_memo INTEGER NOT NULL DEFAULT 0")
         if (
             conn.execute(
                 "SELECT id FROM folders WHERE is_memo = 1 ORDER BY id LIMIT 1"

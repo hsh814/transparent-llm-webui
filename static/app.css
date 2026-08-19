@@ -119,6 +119,8 @@ body {
 
 .show-all { margin-top: 2px; width: 100%; }
 
+.pin-toggle:hover { border-color: var(--accent); color: var(--accent); }
+
 /* --- main chat surface --- */
 
 .main {

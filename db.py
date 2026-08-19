@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS folders (
   name TEXT NOT NULL,
   system_prompt TEXT NOT NULL DEFAULT '',
   is_memo INTEGER NOT NULL DEFAULT 0,
+  pinned INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -79,6 +80,8 @@ def init_db() -> None:
         folder_cols = {row["name"] for row in conn.execute("PRAGMA table_info(folders)")}
         if "is_memo" not in folder_cols:
             conn.execute("ALTER TABLE folders ADD COLUMN is_memo INTEGER NOT NULL DEFAULT 0")
+        if "pinned" not in folder_cols:
+            conn.execute("ALTER TABLE folders ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
         if (
             conn.execute(
                 "SELECT id FROM folders WHERE is_memo = 1 ORDER BY id LIMIT 1"
@@ -105,7 +108,11 @@ def _rows_to_dicts(rows: list[sqlite3.Row]) -> list[dict]:
 def list_folders() -> list[dict]:
     with _lock:
         rows = _get_conn().execute(
-            "SELECT * FROM folders ORDER BY created_at, id"
+            "SELECT f.* FROM folders f"
+            " LEFT JOIN (SELECT folder_id, MAX(updated_at) AS last_chat FROM sessions GROUP BY folder_id) s"
+            " ON s.folder_id = f.id"
+            " ORDER BY f.pinned DESC,"
+            " COALESCE(s.last_chat, f.created_at) DESC, f.id DESC"
         ).fetchall()
     return _rows_to_dicts(rows)
 
@@ -156,6 +163,18 @@ def delete_folder(folder_id: int) -> None:
     with _lock:
         _get_conn().execute("DELETE FROM folders WHERE id = ?", (folder_id,))
         _get_conn().commit()
+
+
+def set_folder_pin(folder_id: int, pinned: int) -> dict | None:
+    with _lock:
+        _get_conn().execute(
+            "UPDATE folders SET pinned = ? WHERE id = ?", (pinned, folder_id)
+        )
+        _get_conn().commit()
+        row = _get_conn().execute(
+            "SELECT * FROM folders WHERE id = ?", (folder_id,)
+        ).fetchone()
+    return dict(row) if row else None
 
 
 # --- sessions ------------------------------------------------------------

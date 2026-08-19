@@ -47,6 +47,15 @@ def delete_folder(request: Request, folder_id: int):
     return templating.folder_list_inner(request)
 
 
+@router.post("/folders/{folder_id}/pin", response_class=HTMLResponse)
+def toggle_pin(request: Request, folder_id: int):
+    folder = db.get_folder(folder_id)
+    if folder is None:
+        return HTMLResponse("", status_code=404)
+    db.set_folder_pin(folder_id, 0 if folder["pinned"] else 1)
+    return templating.folder_list_inner(request, current_folder_id=folder_id)
+
+
 @router.get("/folders/{folder_id}/system-prompt", response_class=HTMLResponse)
 def system_prompt_partial(request: Request, folder_id: int):
     folder = db.get_folder(folder_id)

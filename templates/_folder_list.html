@@ -7,6 +7,12 @@
       <span class="folder-name">{{ folder.name }}</span>
     </button>
     <span class="folder-actions">
+      <button class="btn-mini pin-toggle" type="button"
+              aria-pressed="{{ 'true' if folder.pinned else 'false' }}"
+              title="{{ 'Unpin' if folder.pinned else 'Pin to top' }}"
+              hx-post="/folders/{{ folder.id }}/pin"
+              hx-target="#folder-list"
+              hx-swap="innerHTML">{{ '★' if folder.pinned else '☆' }}</button>
       {% if not folder.is_memo %}
       <button class="btn-mini"
               hx-post="/folders/{{ folder.id }}/delete"

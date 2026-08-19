@@ -25,7 +25,8 @@ body {
 .layout {
   display: grid;
   grid-template-columns: 280px 1fr;
-  height: 100vh;
+  height: 100vh;      /* fallback for browsers without dvh support */
+  height: 100dvh;    /* dynamic viewport: shrinks when mobile bottom bars show */
 }
 
 /* --- sidebar --- */

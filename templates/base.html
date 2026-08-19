@@ -38,6 +38,56 @@
       syncParamsToggle();
     }
   });
+  // Preserve folder open/close state across sidebar re-renders: the server
+  // re-renders #folder-list on session selection, chat creation, renames,
+  // etc., and the re-render starts collapsed. Snapshot open folders before
+  // the swap and re-apply after. htmx processes OOB swaps before the main
+  // swap, so the restore is deferred to a microtask to run after both.
+  var openFolderIds = [];
+  var allFolderIds = [];
+  function snapshotOpenFolders() {
+    openFolderIds = Array.from(document.querySelectorAll('.folder-item.is-open'))
+      .map(function (i) { return i.dataset.folderId; });
+    allFolderIds = Array.from(document.querySelectorAll('.folder-item.is-all'))
+      .map(function (i) { return i.dataset.folderId; });
+  }
+  function restoreOpenFolders(container) {
+    if (!openFolderIds.length) { return; }
+    openFolderIds.forEach(function (id) {
+      var item = container.querySelector('.folder-item[data-folder-id="' + id + '"]');
+      if (item) {
+        item.classList.add('is-open');
+        var toggle = item.querySelector('.folder-toggle');
+        if (toggle) { toggle.setAttribute('aria-expanded', 'true'); }
+        if (allFolderIds.indexOf(id) !== -1) {
+          item.classList.add('is-all');
+          var sa = item.querySelector('.show-all');
+          if (sa) { sa.textContent = 'Show less'; }
+        }
+      }
+    });
+    openFolderIds = [];
+    allFolderIds = [];
+  }
+  function scheduleRestore(container) {
+    setTimeout(function () { restoreOpenFolders(container); }, 0);
+  }
+  document.body.addEventListener('htmx:beforeSwap', function (evt) {
+    var t = evt.detail && evt.detail.target;
+    if (t && t.id === 'folder-list') { snapshotOpenFolders(); }
+  });
+  document.body.addEventListener('htmx:afterSwap', function (evt) {
+    var t = evt.detail && evt.detail.target;
+    if (t && t.id === 'folder-list') { scheduleRestore(t); }
+  });
+  document.body.addEventListener('htmx:oobBeforeSwap', function (evt) {
+    var t = evt.target;
+    if (t && t.id === 'folder-list') { snapshotOpenFolders(); }
+  });
+  document.body.addEventListener('htmx:oobAfterSwap', function (evt) {
+    var t = evt.target;
+    if (t && t.id === 'folder-list') { scheduleRestore(t); }
+  });
   document.body.addEventListener('htmx:afterSwap', function (evt) {
     var t = evt.detail && evt.detail.target;
     if (t && t.id === 'message-list') {

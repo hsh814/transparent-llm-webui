@@ -257,14 +257,29 @@ body {
 
 .param-value { font-weight: 600; color: var(--text); }
 
-.params-toggle summary {
+.model-toggle summary, .params-toggle summary {
   cursor: pointer;
   color: var(--muted);
   font-size: 13px;
   user-select: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
-.params-toggle[open] summary { margin-bottom: 8px; }
+.model-toggle summary::before, .params-toggle summary::before {
+  content: '▸';
+  display: inline-block;
+  transition: transform 0.15s;
+}
+
+.model-toggle[open] summary::before, .params-toggle[open] summary::before {
+  transform: rotate(90deg);
+}
+
+.model-toggle[open] summary, .params-toggle[open] summary { margin-bottom: 8px; }
+
+.params-toggle summary .badge-usage { margin-left: auto; }
 
 .advanced { font-size: 13px; color: var(--muted); }
 
@@ -532,7 +547,7 @@ input[type="range"] { width: 140px; }
     width: 100%;
   }
 
-  .params-toggle {
+  .model-toggle, .params-toggle {
     width: 100%;
   }
 

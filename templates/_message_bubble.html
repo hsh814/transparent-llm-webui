@@ -5,7 +5,7 @@
     <span class="badge">{{ message.model }}{% if message.reasoning_effort %} · effort: {{ message.reasoning_effort }}{% endif %}</span>
     {% endif %}
     {% if message.total_tokens is not none %}
-    <span class="badge badge-usage" title="prompt {{ message.prompt_tokens }} · completion {{ message.completion_tokens }}">{{ message.total_tokens }} tok</span>
+    <span class="badge badge-usage" title="prompt {{ message.prompt_tokens }} · completion {{ message.completion_tokens }} · total {{ message.total_tokens }}">↑{{ message.prompt_tokens if message.prompt_tokens is not none else 0 }} ↓{{ message.completion_tokens if message.completion_tokens is not none else 0 }}</span>
     {% endif %}
     {% if message.role != 'system' %}
     <button class="btn-mini"

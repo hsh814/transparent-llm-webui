@@ -10,19 +10,19 @@
 </head>
 <body hx-ext="sse">
 <script>
-  // Parameters fold: collapsed on phones, expanded on larger screens.
-  // The template renders it open; sync to the viewport so mobile starts
-  // folded and desktop keeps the full panel. Re-run after chat-surface
-  // swaps, which re-create the details element.
+  // Parameters/model fold: collapsed on phones, expanded on larger screens.
+  // The template renders them open; sync to the viewport so mobile starts
+  // folded and desktop keeps the full panels. Re-run after chat-surface
+  // swaps, which re-create the details elements.
   function syncParamsToggle() {
-    var paramsToggle = document.querySelector('.params-toggle');
-    if (!paramsToggle) { return; }
     var mobile = window.matchMedia('(max-width: 640px)').matches;
-    if (mobile) {
-      paramsToggle.removeAttribute('open');
-    } else {
-      paramsToggle.setAttribute('open', '');
-    }
+    document.querySelectorAll('.params-toggle, .model-toggle').forEach(function (el) {
+      if (mobile) {
+        el.removeAttribute('open');
+      } else {
+        el.setAttribute('open', '');
+      }
+    });
   }
   // Keep the latest message visible: scroll the message list to bottom
   // after any swap into it, and on initial load.
@@ -141,7 +141,8 @@
       }
     });
 
-    // Parameters fold: sync to viewport (function defined above).
+    // Parameters/model fold: sync to viewport (function defined above).
+    syncParamsToggle();
     // Copy buttons: delegated so they survive htmx swaps of #chat-surface
     // and #message-list.
     document.body.addEventListener('click', function (evt) {

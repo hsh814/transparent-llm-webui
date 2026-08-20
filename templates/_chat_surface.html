@@ -13,13 +13,15 @@
     </form>
   </div>
   <button class="btn-mini" type="button" id="copy-all-btn">Copy all</button>
-  {% include "_session_usage.html" %}
   {% if folder and folder.type != 'memo' %}
-  {% with models=ctx.models, usage=ctx.usage, ctx_cap=ctx.ctx_cap %}
-  {% include "_model_selector.html" %}
-  {% endwith %}
+  <details class="model-toggle" open>
+    <summary>Model</summary>
+    {% with models=ctx.models, usage=ctx.usage, ctx_cap=ctx.ctx_cap %}
+    {% include "_model_selector.html" %}
+    {% endwith %}
+  </details>
   <details class="params-toggle" open>
-    <summary>Parameters</summary>
+    <summary>Parameters {% include "_session_usage.html" %}</summary>
     {% with ctx_cap=ctx.ctx_cap %}
     {% include "_params_panel.html" %}
     {% endwith %}

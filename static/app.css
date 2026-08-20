@@ -386,6 +386,25 @@ body {
 
 .content { white-space: pre-wrap; word-break: break-word; }
 
+.prompt-response {
+  margin-top: 16px;
+  background: var(--assistant-bubble);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 14px;
+}
+
+.prompt-response-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.response-content { white-space: pre-wrap; word-break: break-word; }
+
 .message.streaming .content::after {
   content: "▍";
   animation: blink 1s steps(2) infinite;

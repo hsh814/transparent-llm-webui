@@ -401,29 +401,44 @@ def show_prompt(request: Request, session_id: int, message_id: int):
 
     The system prompt is looked up by the hash recorded on the assistant row
     at send time (legacy rows fall back to the folder's current prompt, marked
-    as best-effort); the context is every non-memo message before the row.
+    as best-effort). Chat turns send the full prior history; translation turns
+    send only the single chunk they translated — the i-th assistant row maps
+    to the i-th user row (chains consume chunks strictly in id order, and
+    only-last deletion keeps that pairing stable).
     """
     session = db.get_session(session_id)
     if session is None:
         return HTMLResponse("", status_code=404)
     folder = db.get_folder(session["folder_id"])
-    message = next(
-        (m for m in db.list_messages(session_id) if m["id"] == message_id), None
-    )
+    rows = db.list_messages(session_id)
+    message = next((m for m in rows if m["id"] == message_id), None)
     if message is None or message["session_id"] != session_id:
         return HTMLResponse("", status_code=404)
     if message["role"] != "assistant":
         return HTMLResponse("", status_code=404)
 
-    # The system prompt is supplied by the prepend below (from the recorded
-    # hash, or the folder fallback); the session's system row is excluded so
-    # its in-place update by later sends cannot leak a newer prompt into an
-    # older turn's reconstruction.
-    messages = [
-        {"role": row["role"], "content": row["content"]}
-        for row in db.list_messages(session_id)
-        if row["id"] < message_id and row["role"] not in ("memo", "system")
-    ]
+    chunk_note = None
+    if folder is not None and folder.get("type") == "translation":
+        # Translation turns are stateless: [system_prompt, chunk] only.
+        users = [m for m in rows if m["role"] == "user"]
+        assistants = [m for m in rows if m["role"] == "assistant"]
+        idx = assistants.index(message)
+        chunk = users[idx] if idx < len(users) else None
+        messages = []
+        if chunk is not None:
+            messages.append({"role": "user", "content": chunk["content"]})
+        else:
+            chunk_note = "The chunk message for this turn has been deleted."
+    else:
+        # The system prompt is supplied by the prepend below (from the
+        # recorded hash, or the folder fallback); the session's system row is
+        # excluded so its in-place update by later sends cannot leak a newer
+        # prompt into an older turn's reconstruction.
+        messages = [
+            {"role": row["role"], "content": row["content"]}
+            for row in rows
+            if row["id"] < message_id and row["role"] not in ("memo", "system")
+        ]
     sys_note = None
     sys_hash = message.get("system_prompt_hash")
     if sys_hash:
@@ -448,5 +463,6 @@ def show_prompt(request: Request, session_id: int, message_id: int):
             "message": message,
             "messages": messages,
             "sys_note": sys_note,
+            "chunk_note": chunk_note,
         },
     )

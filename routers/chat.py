@@ -65,23 +65,30 @@ def _split_translation(text: str, limit: int) -> list[str]:
     return [c for c in chunks if c.strip()]
 
 
-def _build_messages(folder: dict, session: dict) -> list[dict]:
+def _build_messages(folder: dict, session: dict) -> tuple[list[dict], str | None]:
     """Assemble the API message list from persisted rows.
 
     The folder's system prompt is mirrored into exactly one `system` row
     (visible in the UI and in the DB) and sent verbatim. No hidden prompt is
-    ever added.
+    ever added. Returns the list and the content hash of the prompt in effect
+    (None when the folder has no prompt), so callers can record provenance on
+    the rows they persist.
     """
     prompt = folder.get("system_prompt", "")
     if prompt:
         db.set_system_message(session["id"], prompt)
+        system_hash = db.upsert_system_prompt(prompt)
     else:
         db.delete_system_message(session["id"])
-    return [
-        {"role": row["role"], "content": row["content"]}
-        for row in db.list_messages(session["id"])
-        if row["role"] != "memo"
-    ]
+        system_hash = None
+    return (
+        [
+            {"role": row["role"], "content": row["content"]}
+            for row in db.list_messages(session["id"])
+            if row["role"] != "memo"
+        ],
+        system_hash,
+    )
 
 
 def _sse(event: str, data: str) -> str:
@@ -115,8 +122,13 @@ def send_message(request: Request, session_id: int, content: str = Form(...)):
     if not user_text:
         return HTMLResponse("", status_code=400)
 
+    system_hash = (
+        db.upsert_system_prompt(folder["system_prompt"])
+        if folder.get("system_prompt") else None
+    )
     user_row = db.add_message(
-        session_id, "user", user_text, model=session["model"], reasoning_effort=None
+        session_id, "user", user_text, model=session["model"], reasoning_effort=None,
+        system_prompt_hash=system_hash,
     )
     params = json.loads(session.get("params_json") or "{}")
 
@@ -136,20 +148,7 @@ def send_message(request: Request, session_id: int, content: str = Form(...)):
         user_message_id=user_row["id"],
         effort=params.get("reasoning_effort"),
     )
-    # Keep the on-screen system bubble in sync with the folder prompt.
-    system_oob = ""
-    for row in db.list_messages(session_id):
-        if row["role"] == "system":
-            bubble = templating.templates.env.get_template(
-                "_message_bubble.html"
-            ).render(request=request, message=row, session=session)
-            system_oob = bubble.replace(
-                'class="message system"',
-                'class="message system" hx-swap-oob="true"',
-                1,
-            )
-            break
-    return system_oob + user_bubble + stream_bubble
+    return user_bubble + stream_bubble
 
 
 def _send_translation(request: Request, session: dict, folder: dict,
@@ -167,9 +166,14 @@ def _send_translation(request: Request, session: dict, folder: dict,
     bubble_tpl = templating.templates.env.get_template("_message_bubble.html")
     parts: list[str] = []
     first_id: int | None = None
+    system_hash = (
+        db.upsert_system_prompt(folder.get("system_prompt"))
+        if folder.get("system_prompt") else None
+    )
     for chunk in chunks:
         row = db.add_message(session["id"], "user", chunk,
-                             model=session["model"], reasoning_effort=None)
+                             model=session["model"], reasoning_effort=None,
+                             system_prompt_hash=system_hash)
         if first_id is None:
             first_id = row["id"]
         parts.append(bubble_tpl.render(request=request, message=row,
@@ -203,8 +207,10 @@ def translate_chunk(request: Request, session_id: int,
         return HTMLResponse("", status_code=404)
     messages: list[dict] = []
     prompt = folder.get("system_prompt", "")
+    system_hash = None
     if prompt:
         messages.append({"role": "system", "content": prompt})
+        system_hash = db.upsert_system_prompt(prompt)
     messages.append({"role": "user", "content": user_msg["content"]})
     params = json.loads(session.get("params_json") or "{}")
     try:
@@ -222,6 +228,7 @@ def translate_chunk(request: Request, session_id: int,
         prompt_tokens=usage.get("prompt_tokens") if usage else None,
         completion_tokens=usage.get("completion_tokens") if usage else None,
         total_tokens=usage.get("total_tokens") if usage else None,
+        system_prompt_hash=system_hash,
     )
     bubble_tpl = templating.templates.env.get_template("_message_bubble.html")
     finalized = bubble_tpl.render(request=request, message=row, session=session,
@@ -289,7 +296,7 @@ def stream_message(request: Request, session_id: int, since: int = 0):
                 replay(), media_type="text/event-stream", headers=_stream_headers()
             )
 
-    messages = _build_messages(folder, session)
+    messages, system_hash = _build_messages(folder, session)
 
     def generate():
         try:
@@ -319,6 +326,7 @@ def stream_message(request: Request, session_id: int, since: int = 0):
                 prompt_tokens=usage.get("prompt_tokens") if usage else None,
                 completion_tokens=usage.get("completion_tokens") if usage else None,
                 total_tokens=usage.get("total_tokens") if usage else None,
+                system_prompt_hash=system_hash,
             )
             bubble = templating.templates.env.get_template(
                 "_message_bubble.html"
@@ -353,6 +361,11 @@ def delete_message(request: Request, session_id: int, message_id: int):
     if session is None:
         return HTMLResponse("", status_code=404)
     folder = db.get_folder(session["folder_id"])
+    last = db.last_message(session_id)
+    if last is None or last["id"] != message_id:
+        # Only the session's last message may be deleted; stale buttons
+        # (from beforeend appends) get an empty 403.
+        return HTMLResponse("", status_code=403)
     db.delete_message(message_id)
     return templating.templates.TemplateResponse(
         request, "_chat_messages.html",
@@ -376,5 +389,64 @@ def messages_partial(request: Request, session_id: int):
             "folder": folder,
             "session": session,
             "messages": db.list_messages(session_id),
+        },
+    )
+
+
+@router.get(
+    "/sessions/{session_id}/messages/{message_id}/prompt", response_class=HTMLResponse
+)
+def show_prompt(request: Request, session_id: int, message_id: int):
+    """Full-page reconstruction of the exact prompt a turn received.
+
+    The system prompt is looked up by the hash recorded on the assistant row
+    at send time (legacy rows fall back to the folder's current prompt, marked
+    as best-effort); the context is every non-memo message before the row.
+    """
+    session = db.get_session(session_id)
+    if session is None:
+        return HTMLResponse("", status_code=404)
+    folder = db.get_folder(session["folder_id"])
+    message = next(
+        (m for m in db.list_messages(session_id) if m["id"] == message_id), None
+    )
+    if message is None or message["session_id"] != session_id:
+        return HTMLResponse("", status_code=404)
+    if message["role"] != "assistant":
+        return HTMLResponse("", status_code=404)
+
+    # The system prompt is supplied by the prepend below (from the recorded
+    # hash, or the folder fallback); the session's system row is excluded so
+    # its in-place update by later sends cannot leak a newer prompt into an
+    # older turn's reconstruction.
+    messages = [
+        {"role": row["role"], "content": row["content"]}
+        for row in db.list_messages(session_id)
+        if row["id"] < message_id and row["role"] not in ("memo", "system")
+    ]
+    sys_note = None
+    sys_hash = message.get("system_prompt_hash")
+    if sys_hash:
+        sys_text = db.get_system_prompt_by_hash(sys_hash)
+        if sys_text is None:
+            sys_note = "System prompt no longer available for this turn."
+        else:
+            messages.insert(0, {"role": "system", "content": sys_text})
+    else:
+        prompt = folder.get("system_prompt", "") if folder else ""
+        if prompt:
+            messages.insert(0, {"role": "system", "content": prompt})
+            sys_note = (
+                "System prompt not recorded for this turn — showing the "
+                "folder's current prompt."
+            )
+    return templating.templates.TemplateResponse(
+        request, "_prompt_viewer.html",
+        {
+            "session": session,
+            "folder": folder,
+            "message": message,
+            "messages": messages,
+            "sys_note": sys_note,
         },
     )

@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Prompt · {{ session.title }}{% endblock %}
+{% block body %}
+<div class="prompt-viewer">
+  <div class="prompt-header">
+    <div class="prompt-title">
+      <a class="back-link" href="/sessions/{{ session.id }}">← Back to chat</a>
+      <h1>{{ session.title }}</h1>
+      <span class="badge">{{ message.model }}{% if message.reasoning_effort %} · effort: {{ message.reasoning_effort }}{% endif %}</span>
+    </div>
+    <button class="btn-mini" type="button" id="copy-all-btn">Copy all</button>
+  </div>
+  <p class="muted">Prompt sent to the model for this response — the system prompt
+    {% if message.system_prompt_hash %}as recorded for this turn{% else %}falling back to the folder's current prompt{% endif %},
+    followed by every prior message in the session.</p>
+  {% if sys_note %}
+  <p class="muted sys-note">{{ sys_note }}</p>
+  {% endif %}
+  <div class="message-list prompt-messages">
+    {% for m in messages %}
+    <div class="message {{ m.role }}">
+      <div class="message-meta">
+        <span class="role-label">{{ m.role }}</span>
+        {% if m.role == 'system' and not sys_note %}
+        <span class="badge">recorded for this turn</span>
+        {% endif %}
+      </div>
+      <div class="content">{{ m.content }}</div>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endblock %}

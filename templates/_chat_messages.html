@@ -1,6 +1,8 @@
-{% for message in messages %}
+{% set visible = messages | rejectattr('role', 'equalto', 'system') | list %}
+{% for message in visible %}
+{% set is_last = loop.last %}
 {% include "_message_bubble.html" %}
 {% endfor %}
-{% if not messages %}
+{% if not visible %}
 <p class="muted">No messages yet.</p>
 {% endif %}

@@ -4,6 +4,7 @@ Single module-level connection guarded by a lock. FastAPI runs sync route
 handlers in a threadpool, so every access function acquires the lock.
 """
 
+import hashlib
 import json
 import sqlite3
 import threading
@@ -49,6 +50,11 @@ CREATE TABLE IF NOT EXISTS messages (
   total_tokens INTEGER,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS system_prompts (
+  hash TEXT PRIMARY KEY,
+  content TEXT NOT NULL
+);
 """
 
 DEFAULT_PARAMS = {
@@ -92,6 +98,8 @@ def init_db() -> None:
         for col in ("prompt_tokens", "completion_tokens", "total_tokens"):
             if col not in msg_cols:
                 conn.execute(f"ALTER TABLE messages ADD COLUMN {col} INTEGER")
+        if "system_prompt_hash" not in msg_cols:
+            conn.execute("ALTER TABLE messages ADD COLUMN system_prompt_hash TEXT")
         conn.commit()
 
 
@@ -309,12 +317,14 @@ def add_message(
     prompt_tokens: int | None = None,
     completion_tokens: int | None = None,
     total_tokens: int | None = None,
+    system_prompt_hash: str | None = None,
 ) -> dict:
     with _lock:
         cur = _get_conn().execute(
             "INSERT INTO messages (session_id, role, content, reasoning, model,"
-            " reasoning_effort, prompt_tokens, completion_tokens, total_tokens)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " reasoning_effort, prompt_tokens, completion_tokens, total_tokens,"
+            " system_prompt_hash)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 session_id,
                 role,
@@ -325,6 +335,7 @@ def add_message(
                 prompt_tokens,
                 completion_tokens,
                 total_tokens,
+                system_prompt_hash,
             ),
         )
         _get_conn().execute(
@@ -359,6 +370,37 @@ def delete_message(message_id: int) -> None:
     with _lock:
         _get_conn().execute("DELETE FROM messages WHERE id = ?", (message_id,))
         _get_conn().commit()
+
+
+def upsert_system_prompt(content: str) -> str:
+    """Content-address the prompt text; returns its sha256 hex (idempotent)."""
+    hash_ = hashlib.sha256(content.encode()).hexdigest()
+    with _lock:
+        _get_conn().execute(
+            "INSERT OR IGNORE INTO system_prompts (hash, content) VALUES (?, ?)",
+            (hash_, content),
+        )
+        _get_conn().commit()
+    return hash_
+
+
+def get_system_prompt_by_hash(hash_: str) -> str | None:
+    """Look up the verbatim prompt for a hash; None when missing."""
+    with _lock:
+        row = _get_conn().execute(
+            "SELECT content FROM system_prompts WHERE hash = ?", (hash_,)
+        ).fetchone()
+    return row["content"] if row else None
+
+
+def last_message(session_id: int) -> dict | None:
+    """Highest-id message row in the session (the only deletable one)."""
+    with _lock:
+        row = _get_conn().execute(
+            "SELECT * FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT 1",
+            (session_id,),
+        ).fetchone()
+    return dict(row) if row else None
 
 
 def set_system_message(session_id: int, content: str) -> None:

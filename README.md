@@ -83,7 +83,7 @@ Reconnects are safe: if an assistant message already exists for the `since` id, 
 
 ### System prompt transparency
 
-The folder row is the source of truth. On each send, the prompt is mirrored into exactly one `role=system` message row (updated in place, always the first row) and sent verbatim as the first API message. The same text is rendered in the UI system-prompt block and the system message bubble. No hidden or additional prompt is ever sent.
+The folder row is the source of truth. On each send, the prompt is mirrored into exactly one `role=system` message row (updated in place, always the first row) and sent verbatim as the first API message. The same text is rendered in the UI system-prompt block and the system message bubble. No hidden or additional prompt is ever sent. Prompt texts are content-addressed in `system_prompts` (sha256); each user/assistant message records the hash of the prompt in effect at send time (`messages.system_prompt_hash`), so changing the folder prompt only affects new turns and every assistant bubble's Prompt page reconstructs the exact prompt it received.
 
 ## API
 
@@ -106,7 +106,8 @@ The folder row is the source of truth. On each send, the prompt is mirrored into
 | POST | `/sessions/{id}/translate` | Translate one chunk (form: `user_message_id`); returns finalized bubble + next pending bubble |
 | POST | `/sessions/{id}/memo` | Save memo (memo folders only, 403 otherwise) |
 | GET | `/sessions/{id}/stream?since=` | SSE stream (EventSource) |
-| POST | `/sessions/{id}/messages/{mid}/delete` | Delete message |
+| POST | `/sessions/{id}/messages/{mid}/delete` | Delete the session's last message (403 otherwise) |
+| GET | `/sessions/{id}/messages/{mid}/prompt` | Full-page reconstruction of the prompt sent for that assistant turn |
 | GET | `/sessions/{id}/messages` | Message history partial |
 
 ## Notes

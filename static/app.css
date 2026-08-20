@@ -442,6 +442,13 @@ body {
 
 .btn-mini:hover { border-color: var(--danger); color: var(--danger); }
 
+a.btn-mini {
+  display: inline-block;
+  text-decoration: none;
+  line-height: inherit;
+  padding: 2px 8px;
+}
+
 .btn-copy:hover { border-color: var(--accent); color: var(--accent); }
 
 .btn-refresh {

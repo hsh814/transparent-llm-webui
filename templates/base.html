@@ -24,6 +24,57 @@
       }
     });
   }
+  // Distinguish user scroll (hide/show the composer) from programmatic
+  // auto-scrolls to the bottom (load, send, stream tick, delete) which must
+  // never hide the input. Scroll events fire before rAF in the event loop,
+  // so clearing the flag in rAF keeps it true for every scroll event caused
+  // by the assignment below.
+  var _progScroll = false;
+  function scrollListToBottom(list) {
+    if (!list) { return; }
+    _progScroll = true;
+    list.scrollTop = list.scrollHeight;
+    requestAnimationFrame(function () { _progScroll = false; });
+  }
+  // Attach the scroll-driven hide/show of the composer to #message-list.
+  // Scrolling down hides it; scrolling up OR reaching the bottom shows it.
+  // Re-run after #chat-surface swaps, which replace #message-list with a
+  // fresh node (scroll events do not bubble, so the listener must sit on
+  // the list itself). Idempotent via a marker property.
+  function wireComposerScroll() {
+    var list = document.getElementById('message-list');
+    if (!list || list._composerWired) { return; }
+    list._composerWired = true;
+    var lastTop = list.scrollTop;
+    list.addEventListener('scroll', function () {
+      var top = list.scrollTop;
+      var delta = top - lastTop;
+      lastTop = top;
+      if (!window.matchMedia('(max-width: 640px)').matches) { return; }
+      var composer = document.querySelector('.composer');
+      if (!composer) { return; }
+      // Reaching the bottom always reveals the input: the user is at the
+      // newest message and the next step is typing. Checked before the
+      // programmatic guard so auto-scrolls that land at the bottom (stream
+      // tick, send, delete) also reveal — but never hide.
+      if (top + list.clientHeight >= list.scrollHeight - 1) {
+        composer.classList.remove('is-hidden');
+        // Revealing the composer expands the flex layout, so the old
+        // "bottom" is now short of the new one; finish the jump so the
+        // input stays revealed (the resulting scroll event hits this same
+        // branch and the clamp is then a no-op).
+        var bottom = list.scrollHeight - list.clientHeight;
+        if (list.scrollTop < bottom - 1) { list.scrollTop = bottom; }
+        return;
+      }
+      if (_progScroll) { return; }
+      if (delta > 4) {
+        composer.classList.add('is-hidden');
+      } else if (delta < -4) {
+        composer.classList.remove('is-hidden');
+      }
+    }, { passive: true });
+  }
   // Keep the latest message visible: scroll the message list to bottom
   // after any swap into it, and on initial load.
   document.body.addEventListener('htmx:oobAfterSwap', function (evt) {
@@ -36,6 +87,7 @@
       var btn = document.querySelector('.menu-btn');
       if (btn) { btn.setAttribute('aria-expanded', 'false'); }
       syncParamsToggle();
+      wireComposerScroll();
     }
   });
   // Preserve folder open/close state across sidebar re-renders: the server
@@ -91,7 +143,7 @@
   document.body.addEventListener('htmx:afterSwap', function (evt) {
     var t = evt.detail && evt.detail.target;
     if (t && t.id === 'message-list') {
-      t.scrollTop = t.scrollHeight;
+      scrollListToBottom(t);
     } else if (t && t.id === 'chat-surface') {
       // A session was selected (or created): close the mobile drawer.
       var layout = document.querySelector('.layout');
@@ -99,12 +151,13 @@
       var btn = document.querySelector('.menu-btn');
       if (btn) { btn.setAttribute('aria-expanded', 'false'); }
       syncParamsToggle();
+      wireComposerScroll();
     }
   });
   document.body.addEventListener('htmx:sseMessage', function (evt) {
     var elt = evt.target;
     var list = elt && elt.closest ? elt.closest('#message-list') : null;
-    if (list) { list.scrollTop = list.scrollHeight; }
+    if (list) { scrollListToBottom(list); }
   });
   // Clear the composer after a successful send; keep the draft when the
   // request fails (network error or non-2xx) so it can be retried.
@@ -116,7 +169,8 @@
   });
   document.addEventListener('DOMContentLoaded', function () {
     var list = document.getElementById('message-list');
-    if (list) { list.scrollTop = list.scrollHeight; }
+    if (list) { scrollListToBottom(list); }
+    wireComposerScroll();
 
     // Mobile drawer: hamburger toggles, scrim and Escape close.
     var layout = document.querySelector('.layout');

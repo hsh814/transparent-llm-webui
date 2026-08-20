@@ -568,8 +568,23 @@ input[type="range"] { width: 140px; }
   }
 
   .composer textarea {
-    min-height: 44px;
+    min-height: 36px;  /* compact when not activated */
+    padding: 5px 10px;
     font-size: 16px; /* prevent iOS zoom-to-focus */
+    transition: min-height 0.15s ease, padding 0.15s ease, height 0.15s ease;
+  }
+
+  /* Collapse only while empty: a typed draft must never be clipped, so the
+     rows-based height stays when the field holds text. */
+  .composer textarea:not(:focus):placeholder-shown {
+    height: 36px;
+    overflow: hidden;
+  }
+
+  .composer textarea:focus {
+    min-height: 44px;
+    padding: 8px 10px;
+    height: 90px;  /* ~3 visible lines: 3 x 24px line-height + 16px padding + 2px border */
   }
 
   .message-list {
@@ -578,5 +593,9 @@ input[type="range"] { width: 140px; }
 
   .message {
     max-width: 100%;
+  }
+
+  .composer.is-hidden {
+    display: none;
   }
 }

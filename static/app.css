@@ -144,6 +144,10 @@ body {
 .folder-item .session-list { display: none; }
 .folder-item.is-open .session-list { display: block; }
 
+/* collapsed: hide the Edit form until the folder is expanded */
+.folder-item .folder-edit { display: none; }
+.folder-item.is-open .folder-edit { display: block; }
+
 /* expanded (top 10): hide session items beyond the 10th */
 .folder-item.is-open:not(.is-all) .session-items .session-item:nth-child(n+11) { display: none; }
 

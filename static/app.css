@@ -56,6 +56,9 @@ body {
   margin-bottom: 8px;
   padding: 8px;
   background: var(--bg);
+  /* Size context for the @container rule below: drop type badges before
+     they would overflow instead of letting them pierce the box border. */
+  container-type: inline-size;
 }
 
 .folder-item.active { border-color: var(--accent); }
@@ -84,6 +87,10 @@ body {
   padding: 1px 7px;
   white-space: nowrap;
   flex-shrink: 0;
+}
+
+@container (width < 200px) {
+  .type-badge { display: none; }
 }
 
 .type-memo {
@@ -136,6 +143,12 @@ body {
   flex: 1; text-align: left; display: flex; align-items: center; gap: 4px;
   background: none; border: none; padding: 0; cursor: pointer;
   color: inherit; font: inherit;
+  /* Buttons default to min-width:auto, whose content floor includes the
+     folder name's full nowrap width — that floor defeats flex shrinking
+     and pushed badges/buttons through the box border. Force 0 so the name
+     ellipsizes; clip guards the sub-badge-fits extreme. */
+  min-width: 0;
+  overflow-x: clip;
 }
 .folder-chevron { display: inline-block; transition: transform 0.15s; }
 .folder-item.is-open .folder-chevron { transform: rotate(90deg); }

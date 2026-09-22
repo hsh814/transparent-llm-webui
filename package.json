@@ -1,0 +1,11 @@
+{
+  "name": "transparent-chat-browser-qa",
+  "private": true,
+  "scripts": {
+    "test:browser": "node tests/browser_smoke.mjs"
+  },
+  "description": "Development-only Playwright browser checks; the app needs no frontend build.",
+  "devDependencies": {
+    "playwright": "^1.63.0"
+  }
+}

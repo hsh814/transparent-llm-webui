@@ -6,11 +6,12 @@ handlers in a threadpool, so every access function acquires the lock.
 
 import hashlib
 import json
+import os
 import sqlite3
 import threading
 from pathlib import Path
 
-DB_PATH = Path(__file__).parent / "chat.db"
+DB_PATH = Path(os.environ.get("CHAT_DB_PATH", Path(__file__).parent / "chat.db"))
 
 _lock = threading.Lock()
 _conn: sqlite3.Connection | None = None
@@ -55,6 +56,24 @@ CREATE TABLE IF NOT EXISTS system_prompts (
   hash TEXT PRIMARY KEY,
   content TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS generations (
+  user_message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+  session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  model TEXT NOT NULL,
+  params_json TEXT NOT NULL,
+  messages_json TEXT NOT NULL,
+  system_prompt_hash TEXT,
+  batch_id INTEGER,
+  attempt INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'queued',
+  content TEXT NOT NULL DEFAULT '',
+  reasoning TEXT NOT NULL DEFAULT '',
+  error TEXT,
+  assistant_message_id INTEGER REFERENCES messages(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS messages_session ON messages(session_id, id);
+CREATE INDEX IF NOT EXISTS generations_session ON generations(session_id, user_message_id);
 """
 
 DEFAULT_PARAMS = {
@@ -62,8 +81,6 @@ DEFAULT_PARAMS = {
     "temperature": 0.95,
     "top_p": 0.9,
     "max_tokens": 65535,
-    "top_k": 40,
-    "repeat_penalty": 1.0,
     "seed": None,
 }
 
@@ -101,6 +118,15 @@ def init_db() -> None:
         if "system_prompt_hash" not in msg_cols:
             conn.execute("ALTER TABLE messages ADD COLUMN system_prompt_hash TEXT")
         conn.commit()
+
+
+def recover_generations() -> None:
+    """A process restart must leave interrupted work explicitly retryable."""
+    with _lock, _get_conn() as conn:
+        conn.execute(
+            "UPDATE generations SET status = 'failed', error = 'The server restarted. Retry to continue.'"
+            " WHERE status IN ('queued', 'running')"
+        )
 
 
 def _rows_to_dicts(rows: list[sqlite3.Row]) -> list[dict]:
@@ -261,6 +287,8 @@ def create_session(
 def update_session(session_id: int, **fields) -> dict | None:
     if not fields:
         return get_session(session_id)
+    if fields.keys() - {"title", "model", "params_json", "params_updated_at"}:
+        raise ValueError("Unsupported session field")
     cols = ", ".join(f"{k} = ?" for k in fields)
     with _lock:
         _get_conn().execute(
@@ -435,3 +463,162 @@ def delete_system_message(session_id: int) -> None:
             (session_id,),
         )
         _get_conn().commit()
+
+
+class GenerationBusy(ValueError):
+    pass
+
+
+def enqueue_turns(session_id: int, chunks: list[str]) -> list[dict]:
+    """Atomically save input and the exact request, before any network work."""
+    with _lock, _get_conn() as conn:
+        session = conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        if session is None:
+            raise ValueError("Chat not found")
+        folder = conn.execute("SELECT * FROM folders WHERE id = ?", (session["folder_id"],)).fetchone()
+        if folder["type"] == "memo":
+            raise ValueError("This folder stores notes")
+        if conn.execute(
+            "SELECT 1 FROM generations WHERE session_id = ? AND status IN ('queued', 'running')",
+            (session_id,),
+        ).fetchone():
+            raise GenerationBusy("Wait for the current response or stop it before sending another message.")
+        prompt = folder["system_prompt"]
+        prompt_hash = hashlib.sha256(prompt.encode()).hexdigest()
+        conn.execute("INSERT OR IGNORE INTO system_prompts VALUES (?, ?)", (prompt_hash, prompt))
+        history = [dict(row) for row in conn.execute(
+            "SELECT role, content FROM messages WHERE session_id = ? AND role IN ('user', 'assistant') ORDER BY id",
+            (session_id,),
+        )]
+        prefix = [{"role": "system", "content": prompt}] if prompt else []
+        ids = []
+        for chunk in chunks:
+            cur = conn.execute(
+                "INSERT INTO messages (session_id, role, content, system_prompt_hash) VALUES (?, 'user', ?, ?)",
+                (session_id, chunk, prompt_hash),
+            )
+            user_id = cur.lastrowid
+            messages = prefix + (history if folder["type"] == "chat" else []) + [{"role": "user", "content": chunk}]
+            conn.execute(
+                "INSERT INTO generations (user_message_id, session_id, model, params_json, messages_json, system_prompt_hash, batch_id)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (user_id, session_id, session["model"],
+                 json.dumps({k: v for k, v in json.loads(session["params_json"]).items() if k in DEFAULT_PARAMS}),
+                 json.dumps(messages), prompt_hash, ids[0] if ids else user_id),
+            )
+            ids.append(user_id)
+        title = session["title"]
+        if title == "New Chat":
+            title = " ".join(chunks[0].split())[:60]
+        conn.execute("UPDATE sessions SET title = ?, updated_at = datetime('now') WHERE id = ?", (title, session_id))
+        return [dict(conn.execute("SELECT * FROM messages WHERE id = ?", (uid,)).fetchone()) for uid in ids]
+
+
+def list_generations(session_id: int) -> list[dict]:
+    with _lock:
+        return _rows_to_dicts(_get_conn().execute(
+            "SELECT * FROM generations WHERE session_id = ? ORDER BY user_message_id", (session_id,)
+        ).fetchall())
+
+
+def conversation_snapshot(session_id: int) -> tuple[list[dict], list[dict]]:
+    """Read replies and generation states together while workers are active."""
+    with _lock:
+        conn = _get_conn()
+        rows = _rows_to_dicts(conn.execute("SELECT * FROM messages WHERE session_id = ? ORDER BY id", (session_id,)).fetchall())
+        jobs = _rows_to_dicts(conn.execute("SELECT * FROM generations WHERE session_id = ? ORDER BY user_message_id", (session_id,)).fetchall())
+        return rows, jobs
+
+
+def delete_last_message(session_id: int, message_id: int) -> bool:
+    with _lock, _get_conn() as conn:
+        if conn.execute("SELECT 1 FROM generations WHERE session_id = ? AND status IN ('queued', 'running')", (session_id,)).fetchone():
+            raise GenerationBusy("Stop the response before deleting messages.")
+        row = conn.execute("SELECT MAX(id) FROM messages WHERE session_id = ?", (session_id,)).fetchone()
+        if row[0] != message_id:
+            return False
+        conn.execute("DELETE FROM messages WHERE id = ? AND session_id = ?", (message_id, session_id))
+        return True
+
+
+def get_generation(session_id: int, user_message_id: int) -> dict | None:
+    with _lock:
+        row = _get_conn().execute(
+            "SELECT * FROM generations WHERE session_id = ? AND user_message_id = ?",
+            (session_id, user_message_id),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def claim_generation(session_id: int) -> dict | None:
+    with _lock, _get_conn() as conn:
+        if conn.execute("SELECT 1 FROM generations WHERE session_id = ? AND status = 'running'", (session_id,)).fetchone():
+            return None
+        row = conn.execute(
+            "SELECT * FROM generations WHERE session_id = ? AND status = 'queued' ORDER BY user_message_id LIMIT 1",
+            (session_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        conn.execute("UPDATE generations SET status = 'running' WHERE user_message_id = ?", (row["user_message_id"],))
+        return dict(row)
+
+
+def update_generation(job: dict, content: str, reasoning: str) -> bool:
+    with _lock, _get_conn() as conn:
+        return conn.execute(
+            "UPDATE generations SET content = ?, reasoning = ? WHERE user_message_id = ? AND attempt = ? AND status = 'running'",
+            (content, reasoning, job["user_message_id"], job["attempt"]),
+        ).rowcount == 1
+
+
+def finish_generation(job: dict, content: str, reasoning: str, usage: dict | None) -> None:
+    usage = usage or {}
+    with _lock, _get_conn() as conn:
+        row = conn.execute("SELECT status, attempt FROM generations WHERE user_message_id = ?", (job["user_message_id"],)).fetchone()
+        if row is None or row["status"] != "running" or row["attempt"] != job["attempt"]:
+            return
+        cur = conn.execute(
+            "INSERT INTO messages (session_id, role, content, reasoning, model, reasoning_effort,"
+            " prompt_tokens, completion_tokens, total_tokens, system_prompt_hash)"
+            " VALUES (?, 'assistant', ?, ?, ?, ?, ?, ?, ?, ?)",
+            (job["session_id"], content, reasoning or None, job["model"],
+             json.loads(job["params_json"]).get("reasoning_effort"), usage.get("prompt_tokens"),
+             usage.get("completion_tokens"), usage.get("total_tokens"), job["system_prompt_hash"]),
+        )
+        conn.execute(
+            "UPDATE generations SET status = 'completed', content = ?, reasoning = ?, assistant_message_id = ?"
+            " WHERE user_message_id = ?", (content, reasoning, cur.lastrowid, job["user_message_id"]),
+        )
+        conn.execute("UPDATE sessions SET updated_at = datetime('now') WHERE id = ?", (job["session_id"],))
+
+
+def interrupt_generations(session_id: int, error: str, status: str = "failed", job: dict | None = None) -> None:
+    with _lock, _get_conn() as conn:
+        if job is not None:
+            current = conn.execute("SELECT status, attempt FROM generations WHERE user_message_id = ?", (job["user_message_id"],)).fetchone()
+            if current is None or current["status"] != "running" or current["attempt"] != job["attempt"]:
+                return
+        conn.execute(
+            "UPDATE generations SET status = ?, error = ? WHERE session_id = ? AND status IN ('queued', 'running')",
+            (status, error, session_id),
+        )
+
+
+def retry_generations(session_id: int) -> bool:
+    with _lock, _get_conn() as conn:
+        if conn.execute(
+            "SELECT 1 FROM generations WHERE session_id = ? AND status IN ('queued', 'running')", (session_id,)
+        ).fetchone():
+            raise GenerationBusy("A response is already in progress.")
+        # Only retry the latest submission: old failures must never be silently replayed.
+        latest = conn.execute("SELECT MAX(id) FROM messages WHERE session_id = ? AND role = 'user'", (session_id,)).fetchone()[0]
+        last_job = conn.execute("SELECT status, batch_id FROM generations WHERE user_message_id = ?", (latest,)).fetchone()
+        if last_job is None or last_job["status"] not in ("failed", "cancelled"):
+            return False
+        conn.execute(
+            "UPDATE generations SET status = 'queued', content = '', reasoning = '', error = NULL, attempt = attempt + 1"
+            " WHERE session_id = ? AND batch_id = ? AND status IN ('failed', 'cancelled')",
+            (session_id, last_job["batch_id"]),
+        )
+        return True

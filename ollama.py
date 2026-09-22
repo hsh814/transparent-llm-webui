@@ -9,6 +9,8 @@ Auth: `Authorization: Bearer $OLLAMA_API_KEY`.
 
 import json
 import os
+import time
+from functools import wraps
 from typing import Iterator
 
 import httpx
@@ -17,18 +19,29 @@ API_BASE = os.environ.get("OLLAMA_API_BASE_URL", "https://ollama.com")
 OPENAI_BASE = os.environ.get("OLLAMA_OPENAI_BASE_URL", "https://ollama.com/v1")
 
 TIMEOUT = httpx.Timeout(120.0, connect=20.0)
+METADATA_TIMEOUT = httpx.Timeout(5.0, connect=3.0)
 
-_CACHE: dict[str, object] = {}
-
-
-def _cache_get(key: str) -> tuple[bool, object]:
-    if key in _CACHE:
-        return True, _CACHE[key]
-    return False, None
+_CACHE: dict[tuple, tuple[float, object]] = {}
 
 
-def _cache_set(key: str, value: object) -> None:
-    _CACHE[key] = value
+def _metadata_cache(function):
+    """Cache successful metadata for five minutes and outages for 30 seconds."""
+    @wraps(function)
+    def cached(*args):
+        key = (function.__name__, args)
+        entry = _CACHE.get(key)
+        if entry and entry[0] > time.monotonic():
+            if isinstance(entry[1], Exception):
+                raise entry[1]
+            return entry[1]
+        try:
+            value = function(*args)
+        except Exception as exc:
+            _CACHE[key] = (time.monotonic() + 30, exc)
+            raise
+        _CACHE[key] = (time.monotonic() + 300, value)
+        return value
+    return cached
 
 
 def clear_cache() -> None:
@@ -44,26 +57,21 @@ def _client() -> httpx.Client:
     return httpx.Client(base_url=OPENAI_BASE, headers=_headers(), timeout=TIMEOUT)
 
 
+@_metadata_cache
 def list_models() -> list[str]:
     """GET /v1/models -> [model ids]."""
-    hit, val = _cache_get("models")
-    if hit:
-        return val
     with _client() as client:
-        resp = client.get("/models")
+        resp = client.get("/models", timeout=METADATA_TIMEOUT)
         resp.raise_for_status()
         data = resp.json()
     models = [m["id"] for m in data.get("data", [])]
-    _cache_set("models", models)
     return models
 
 
+@_metadata_cache
 def model_context_length(model: str) -> int | None:
     """POST /api/show -> context length from model_info, or None."""
-    hit, val = _cache_get(f"ctx:{model}")
-    if hit:
-        return val
-    with httpx.Client(base_url=API_BASE, headers=_headers(), timeout=TIMEOUT) as client:
+    with httpx.Client(base_url=API_BASE, headers=_headers(), timeout=METADATA_TIMEOUT) as client:
         resp = client.post("/api/show", json={"model": model})
         resp.raise_for_status()
         data = resp.json()
@@ -73,7 +81,6 @@ def model_context_length(model: str) -> int | None:
         if key.endswith(".context_length") and isinstance(value, (int, float)):
             ctx = int(value)
             break
-    _cache_set(f"ctx:{model}", ctx)
     return ctx
 
 
@@ -83,15 +90,9 @@ def _build_payload(model: str, messages: list[dict], params: dict) -> dict:
         "messages": messages,
         "stream": True,
     }
-    for key in ("reasoning_effort", "temperature", "top_p", "max_tokens"):
+    for key in ("reasoning_effort", "temperature", "top_p", "max_tokens", "seed"):
         if params.get(key) is not None:
             payload[key] = params[key]
-    options: dict = {}
-    for key in ("num_ctx", "top_k", "repeat_penalty", "seed"):
-        if params.get(key) is not None:
-            options[key] = params[key]
-    if options:
-        payload["options"] = options
     return payload
 
 
@@ -104,6 +105,7 @@ def chat_stream(model: str, messages: list[dict], params: dict) -> Iterator[dict
     payload = _build_payload(model, messages, params)
     payload["stream_options"] = {"include_usage": True}
     usage: dict | None = None
+    finished = False
     with _client() as client:
         with client.stream("POST", "/chat/completions", json=payload) as resp:
             resp.raise_for_status()
@@ -112,11 +114,14 @@ def chat_stream(model: str, messages: list[dict], params: dict) -> Iterator[dict
                     continue
                 data = line[5:].strip()
                 if data == "[DONE]":
+                    finished = True
                     break
                 try:
                     chunk = json.loads(data)
-                except json.JSONDecodeError:
-                    continue
+                except json.JSONDecodeError as exc:
+                    raise RuntimeError("Invalid response from Ollama") from exc
+                if chunk.get("error"):
+                    raise RuntimeError("Ollama reported a generation error")
                 if chunk.get("usage"):
                     usage = chunk.get("usage")
                 choices = chunk.get("choices") or []
@@ -125,13 +130,13 @@ def chat_stream(model: str, messages: list[dict], params: dict) -> Iterator[dict
                 delta = choices[0].get("delta") or {}
                 finish = choices[0].get("finish_reason")
                 if finish is not None:
-                    # Stop yielding content, but keep reading: Ollama sends the
-                    # usage chunk after the finish_reason chunk, before [DONE].
-                    continue
-                if delta.get("reasoning"):
-                    yield {"type": "reasoning", "text": delta["reasoning"]}
+                    finished = True
+                if delta.get("reasoning") or delta.get("reasoning_content"):
+                    yield {"type": "reasoning", "text": delta.get("reasoning") or delta["reasoning_content"]}
                 if delta.get("content"):
                     yield {"type": "content", "text": delta["content"]}
+            if not finished:
+                raise RuntimeError("Ollama disconnected before completing the response")
             yield {"type": "done", "text": "", "usage": usage}
 
 

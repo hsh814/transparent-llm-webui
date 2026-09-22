@@ -1,5 +1,5 @@
-<details class="system-prompt" id="system-prompt-block" open>
-  <summary>System Prompt ({{ 'set' if folder.system_prompt else 'empty' }})</summary>
+<details class="system-prompt" id="system-prompt-block" {{ 'open' if folder.system_prompt else '' }}>
+  <summary><span class="status-dot {{ 'inactive' if not folder.system_prompt else '' }}"></span>System prompt <span class="muted">{{ 'Active' if folder.system_prompt else 'None' }}</span></summary>
   {% if folder.system_prompt %}
   <pre>{{ folder.system_prompt }}</pre>
   {% else %}

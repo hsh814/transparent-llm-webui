@@ -1,63 +1,58 @@
+<input type="hidden" id="active-session" name="active_session_id" value="{{ session.id if session else '' }}">
 {% if session %}
 {% set params = session.params_json | from_json %}
-{% set ctx = chat_context(session) %}
 {% set messages = chat_messages(session.id) %}
 {% set total = session_token_total(session.id) %}
-<div class="chat-header">
+<header class="chat-header" data-session-id="{{ session.id }}">
   <div class="chat-title">
-    <form hx-post="/sessions/{{ session.id }}/rename"
-          hx-target="#folder-list"
-          hx-swap="innerHTML"
-          class="inline-form">
-      <input type="text" name="title" value="{{ session.title }}" class="title-input">
+    <div class="eyebrow">{{ folder.name }} <span>/ {{ folder.type }}</span></div>
+    <form hx-post="/sessions/{{ session.id }}/rename" hx-target="#folder-list" hx-swap="innerHTML" hx-trigger="submit, change" class="inline-form">
+      <input type="text" name="title" value="{{ session.title }}" class="title-input" aria-label="Chat title" maxlength="200">
     </form>
   </div>
-  <button class="btn-mini" type="button" id="copy-all-btn">Copy all</button>
-  {% if folder and folder.type != 'memo' %}
-  <details class="model-toggle" open>
-    <summary>Model</summary>
-    {% with models=ctx.models, usage=ctx.usage, ctx_cap=ctx.ctx_cap %}
-    {% include "_model_selector.html" %}
-    {% endwith %}
-  </details>
-  <details class="params-toggle" open>
-    <summary>Parameters {% include "_session_usage.html" %}</summary>
-    {% with ctx_cap=ctx.ctx_cap %}
-    {% include "_params_panel.html" %}
-    {% endwith %}
-  </details>
+  <button class="btn-mini" type="button" id="copy-all-btn">Copy chat</button>
+  {% if folder.type != 'memo' %}
+  {% set ctx = chat_context(session) %}
+  {% with models=ctx.models, usage=ctx.usage, ctx_cap=ctx.ctx_cap %}{% include "_model_selector.html" %}{% endwith %}
   {% endif %}
+</header>
+{% if folder.type != 'memo' %}
+<div class="context-bar">
+  {% include "_system_prompt.html" %}
+  <details class="params-toggle">
+    <summary>Settings <span aria-hidden="true">⚙</span></summary>
+    <div class="settings-content"><div class="settings-heading"><div>Generation settings <span class="muted">Applied to your next message</span></div><button type="submit" form="params-panel" class="btn">Apply</button></div>
+    {% with ctx_cap=ctx.ctx_cap %}{% include "_params_panel.html" %}{% endwith %}
+    </div>
+  </details>
+  {% include "_session_usage.html" %}
 </div>
-{% if folder and folder.type != 'memo' %}
-{% include "_system_prompt.html" %}
 {% endif %}
-<div id="message-list" class="message-list">
+<div id="message-list" class="message-list" aria-label="Conversation" tabindex="0">
   {% include "_chat_messages.html" %}
 </div>
-{% if folder and folder.type == 'memo' %}
-<form class="composer" hx-post="/sessions/{{ session.id }}/memo"
-      hx-target="#message-list" hx-swap="beforeend"
-      hx-disabled-elt="find button[type=submit]">
-  <textarea name="content" rows="2" placeholder="Write a memo…" required></textarea>
-  <button type="submit" class="btn">Save</button>
-</form>
-{% elif folder and folder.type == 'translation' %}
-<form class="composer" hx-post="/sessions/{{ session.id }}/send"
-      hx-target="#message-list" hx-swap="beforeend"
-      hx-disabled-elt="find button[type=submit]">
-  <textarea name="content" rows="4" placeholder="Text to translate…" required></textarea>
-  <button type="submit" class="btn">Translate</button>
-</form>
+<div class="composer-wrap">
+  <button class="btn-mini jump-latest" type="button" hidden>↓ Latest message</button>
+  <form class="composer" data-session-id="{{ session.id }}" data-mode="{{ folder.type }}"
+        hx-post="/sessions/{{ session.id }}/{{ 'memo' if folder.type == 'memo' else 'send' }}"
+        hx-target="#message-list" hx-swap="beforeend" hx-disabled-elt="find button[type=submit]" hx-sync="this:drop">
+    <textarea name="content" rows="2" aria-label="{{ 'Note' if folder.type == 'memo' else 'Message' }}"
+              placeholder="{{ 'Write something worth keeping…' if folder.type == 'memo' else 'Paste the text you want to translate…' if folder.type == 'translation' else 'Ask anything, think out loud…' }}" required></textarea>
+    <div class="composer-actions"><span class="composer-status" role="status"></span>
+      <button type="button" class="btn-stop" hx-post="/sessions/{{ session.id }}/stop" hx-target="#message-list" hx-swap="innerHTML" hx-disabled-elt="this" hidden>■ Stop</button>
+      <button type="submit" class="btn">{{ 'Save note' if folder.type == 'memo' else 'Translate' if folder.type == 'translation' else 'Send' }} <span aria-hidden="true">↑</span></button>
+    </div>
+  </form>
+  <div class="composer-hint">{% if folder.type == 'memo' %}Only saved here. Never sent to a model.{% elif folder.type == 'translation' %}Translated in chunks of {{ folder.chunk_limit or 1000 }} characters. Each chunk uses the visible system prompt.{% else %}Enter to send · Shift + Enter for a new line{% endif %}<span>Drafts saved in this browser</span></div>
+</div>
 {% else %}
-<form class="composer" hx-post="/sessions/{{ session.id }}/send"
-      hx-target="#message-list" hx-swap="beforeend"
-      hx-disabled-elt="find button[type=submit]">
-  <textarea name="content" rows="2" placeholder="Message…" required></textarea>
-  <button type="submit" class="btn">Send</button>
-</form>
-{% endif %}
-{% else %}
-<div class="empty-state">
-  <p>Select a chat, or create a folder and a new chat to begin.</p>
+<div class="welcome-bar"><span class="eyebrow">Your space to think</span><span class="muted">Transparent Chat</span></div>
+<div class="empty-state welcome">
+  <div class="welcome-mark" aria-hidden="true">t</div>
+  <div class="eyebrow">A CLEARER CONVERSATION</div>
+  <h1>Room for your next idea.</h1>
+  <p>Chat, translate, or keep a thought for later.<br>Your prompts and settings are always in view.</p>
+  <button class="btn" hx-post="{{ '/folders/' ~ folder.id ~ '/sessions' if folder else '/start' }}" hx-target="#folder-list" hx-swap="innerHTML">＋ Start a conversation</button>
+  <div class="welcome-features"><div><span>01</span><strong>Make it your own</strong><p>Organize conversations in folders with a shared system prompt.</p></div><div><span>02</span><strong>See the whole picture</strong><p>Inspect the exact request behind each response.</p></div><div><span>03</span><strong>Keep what matters</strong><p>Use Memo folders for notes and Translation folders for longer texts.</p></div></div>
 </div>
 {% endif %}

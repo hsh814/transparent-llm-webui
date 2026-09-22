@@ -10,9 +10,8 @@
     </div>
     <button class="btn-mini" type="button" id="copy-all-btn">Copy all</button>
   </div>
-  <p class="muted">Prompt sent to the model for this response — the system prompt
-    {% if message.system_prompt_hash %}as recorded for this turn{% else %}falling back to the folder's current prompt{% endif %},
-    {% if folder and folder.type == 'translation' %}followed by the single chunk this turn translated.{% else %}followed by every prior message in the session.{% endif %}</p>
+  <p class="muted">{{ 'Exact messages saved when this request was submitted, in the order sent to the model.' if recorded else 'Reconstructed messages for this legacy response.' }}</p>
+  {% if request_params %}<details class="request-params"><summary>Request settings</summary><pre>{{ request_params | tojson(indent=2) }}</pre></details>{% endif %}
   {% if sys_note %}
   <p class="muted sys-note">{{ sys_note }}</p>
   {% endif %}

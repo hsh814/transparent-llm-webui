@@ -5,8 +5,11 @@
        hx-get="/sessions/{{ session.id }}"
        hx-target="#chat-surface"
        hx-swap="outerHTML"
+       hx-push-url="/?session={{ session.id }}"
+       aria-current="{{ 'page' if session.id == current_session_id else 'false' }}"
+       title="{{ session.title }}"
        class="session-link">{{ session.title }}</a>
-    <button class="btn-mini"
+    <button class="btn-mini delete-session" aria-label="Delete {{ session.title }}"
             hx-post="/sessions/{{ session.id }}/delete"
             hx-target="#folder-list"
             hx-swap="innerHTML"

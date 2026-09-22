@@ -1,6 +1,6 @@
 <div class="message {{ message.role }}" id="message-{{ message.id }}">
   <div class="message-meta">
-    <span class="role-label">{{ message.role }}</span>
+    <span class="role-label">{{ 'You' if message.role == 'user' else 'Note' if message.role == 'memo' else message.role }}</span>
     {% if message.model %}
     <span class="badge">{{ message.model }}{% if message.reasoning_effort %} · effort: {{ message.reasoning_effort }}{% endif %}</span>
     {% endif %}
@@ -9,14 +9,14 @@
     {% endif %}
     {% set is_last = is_last | default(True) %}
     {% if message.role != 'system' and is_last %}
-    <button class="btn-mini"
+    <button class="btn-mini delete-message" aria-label="Delete latest message"
             hx-post="/sessions/{{ session.id }}/messages/{{ message.id }}/delete"
             hx-target="#message-list"
             hx-swap="innerHTML"
             hx-confirm="Delete this message?">×</button>
     {% endif %}
-    {% if message.role == 'assistant' and message.total_tokens is not none %}
-    <a class="btn-mini" target="_blank"
+    {% if message.role == 'assistant' %}
+    <a class="btn-mini" target="_blank" rel="noopener"
        href="/sessions/{{ session.id }}/messages/{{ message.id }}/prompt">Prompt</a>
     {% endif %}
     <button class="btn-mini btn-copy"
@@ -24,7 +24,7 @@
             data-copy='{{ message.content | tojson }}'>Copy</button>
   </div>
   {% if message.reasoning %}
-  <details class="reasoning" open>
+  <details class="reasoning">
     <summary>Thinking</summary>
     <div class="reasoning-text">{{ message.reasoning }}</div>
   </details>

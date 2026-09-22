@@ -1,13 +1,23 @@
 """Jinja2 templates + fragment helpers shared by app and routers."""
 
 import json
+from pathlib import Path
 
 from fastapi.templating import Jinja2Templates
 
 import db
 import ollama
 
-templates = Jinja2Templates(directory="templates")
+templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
+
+
+def asset_url(name: str) -> str:
+    """Keep cached browser assets in sync with the server's current templates."""
+    asset = Path(__file__).parent / "static" / name
+    return f"/static/{name}?v={asset.stat().st_mtime_ns}"
+
+
+templates.env.globals["asset_url"] = asset_url
 
 
 def _from_json(value: str) -> dict:
@@ -35,19 +45,58 @@ def chat_context(session: dict) -> dict:
     except Exception:
         models = [session["model"]]
     try:
-        ctx_cap = ollama.model_context_length(session["model"]) or 8192
+        ctx_cap = ollama.model_context_length(session["model"])
     except Exception:
-        ctx_cap = 8192
-    return {"models": models, "ctx_cap": ctx_cap, "usage": db.model_usage()}
+        ctx_cap = None
+    return {"models": list(dict.fromkeys([session["model"], *models])), "ctx_cap": ctx_cap, "usage": db.model_usage()}
 
 
 def chat_messages(session_id: int) -> list[dict]:
-    return db.list_messages(session_id)
+    rows, generations = db.conversation_snapshot(session_id)
+    jobs = {job["user_message_id"]: job for job in generations}
+    live = next((job["user_message_id"] for job in jobs.values() if job["status"] in ("queued", "running")), None)
+    answers = {job["assistant_message_id"] for job in jobs.values() if job["assistant_message_id"]}
+    by_id = {row["id"]: row for row in rows}
+    result = []
+    for row in rows:
+        if row["id"] in answers:
+            continue
+        result.append(row)
+        if job := jobs.get(row["id"]):
+            if job["assistant_message_id"] in by_id:
+                result.append(by_id[job["assistant_message_id"]])
+            elif job["status"] != "completed":
+                result.append({"role": "generation", "id": row["id"], "job": job, "connect": live == row["id"]})
+    return result
+
+
+def generation_bubble(request, session: dict, job: dict, oob=False, connect=None) -> str:
+    if job["status"] == "completed":
+        message = next((m for m in db.list_messages(session["id"]) if m["id"] == job["assistant_message_id"]), None)
+        inner = templates.env.get_template("_message_bubble.html").render(
+            request=request, session=session, message=message,
+            is_last=message["id"] == (db.last_message(session["id"]) or {}).get("id"),
+        ) if message else ""
+    else:
+        jobs = db.list_generations(session["id"])
+        if connect is None:
+            live = next((j["user_message_id"] for j in jobs if j["status"] in ("queued", "running")), None)
+            connect = live == job["user_message_id"]
+        latest_batch = jobs[-1]["batch_id"] if jobs else None
+        inner = templates.env.get_template("_stream_bubble.html").render(
+            request=request, session=session, job=job, connect=connect,
+            retryable=job["batch_id"] == latest_batch,
+        )
+    if oob:
+        return (inner or '<div></div>').replace('<div', f'<div hx-swap-oob="outerHTML:#stream-bubble-{job["user_message_id"]}"', 1)
+    return inner
 
 
 templates.env.globals["chat_context"] = chat_context
 templates.env.globals["chat_messages"] = chat_messages
 templates.env.globals["session_token_total"] = db.session_token_total
+templates.env.globals["generation_bubble"] = generation_bubble
+templates.env.globals["last_message"] = db.last_message
 
 
 def folders_with_sessions() -> list[dict]:

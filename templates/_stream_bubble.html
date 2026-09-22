@@ -1,16 +1,14 @@
-<div class="message assistant streaming"
-     id="stream-bubble-{{ user_message_id }}"
-     sse-connect="/sessions/{{ session.id }}/stream?since={{ user_message_id }}"
-     sse-close="done"
-     sse-swap="done"
-     hx-swap="outerHTML">
-  <div class="message-meta">
-    <span class="role-label">assistant</span>
-    <span class="badge">{{ session.model }}{% if effort %} · effort: {{ effort }}{% endif %}</span>
-  </div>
-  <details class="reasoning" open>
-    <summary>Thinking</summary>
-    <div class="reasoning-text" sse-swap="reasoning" hx-swap="beforeend"></div>
-  </details>
-  <div class="content" sse-swap="content" hx-swap="beforeend"></div>
+<div class="message assistant {{ 'streaming' if job.status in ('queued', 'running') else 'generation-error' }}"
+     id="stream-bubble-{{ job.user_message_id }}" data-generation-status="{{ job.status }}"
+     {% if connect %}sse-connect="/sessions/{{ session.id }}/stream?since={{ job.user_message_id }}" sse-close="done" sse-swap="done" hx-swap="outerHTML"{% endif %}>
+  <div class="message-meta"><span class="role-label">Assistant</span><span class="badge">{{ job.model }}</span><span class="generation-label">{{ 'Responding…' if job.status == 'running' else 'Queued' if job.status == 'queued' else 'Stopped' if job.status == 'cancelled' else 'Could not finish' }}</span></div>
+  {% if job.status in ('queued', 'running') %}
+  <details class="reasoning" hidden><summary>Thinking</summary><div class="reasoning-text" sse-swap="reasoning" hx-swap="innerHTML"></div></details>
+  <div class="content" sse-swap="content" hx-swap="innerHTML"></div>
+  {% else %}
+  {% if job.reasoning %}<details class="reasoning"><summary>Thinking (partial)</summary><div class="reasoning-text">{{ job.reasoning }}</div></details>{% endif %}
+  {% if job.content %}<div class="content">{{ job.content }}</div>{% endif %}
+  <p class="error-text">{{ job.error }}</p>
+  {% if retryable %}<button class="btn-mini" hx-post="/sessions/{{ session.id }}/retry" hx-target="#message-list" hx-swap="innerHTML">Retry with original settings</button>{% endif %}
+  {% endif %}
 </div>

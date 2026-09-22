@@ -1,9 +1,10 @@
-"""Simple AI Chat — FastAPI app.
+"""Transparent Chat — FastAPI app.
 
 Serves the htmx UI and a small JSON-free HTML/SSE API. Single user, no auth.
 """
 
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -15,7 +16,6 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 import db
-import ollama
 import templating
 from routers import chat, folders, sessions
 
@@ -26,30 +26,38 @@ if not os.environ.get("OLLAMA_API_KEY"):
 
 BASE_DIR = Path(__file__).parent
 
-app = FastAPI(title="Simple AI Chat")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    db.init_db()
+    db.recover_generations()
+    yield
+
+
+app = FastAPI(title="Transparent Chat", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 
 app.include_router(folders.router)
 app.include_router(sessions.router)
 app.include_router(chat.router)
 
-db.init_db()
-
 
 @app.get("/", response_class=HTMLResponse)
-def index(request: Request):
+def index(request: Request, session: int | None = None):
     folders = templating.folders_with_sessions()
     folder = folders[0] if folders else None
-    session = None
-    if folder is not None:
+    selected = db.get_session(session) if session is not None else None
+    if selected:
+        folder = db.get_folder(selected["folder_id"])
+    elif folder is not None:
         sessions_ = folder["sessions"]
-        session = sessions_[0] if sessions_ else None
+        selected = sessions_[0] if sessions_ else None
     return templating.templates.TemplateResponse(
         request, "index.html",
         {
             "request": request,
             "folders": folders,
             "current_folder": folder,
-            "current_session": session,
+            "current_session": selected,
         },
     )

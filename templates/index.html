@@ -1,28 +1,25 @@
 {% extends "base.html" %}
 {% block body %}
 <div class="layout">
-  <button class="menu-btn" type="button" aria-label="Toggle chats" aria-expanded="false">☰</button>
-  <aside class="sidebar">
-    <div class="sidebar-header">
-      <h1>Simple AI Chat</h1>
-      <button class="btn"
-              hx-post="/folders"
-              hx-vals='{"name": "New Folder", "system_prompt": ""}'
-              hx-target="#folder-list"
-              hx-swap="innerHTML">+ Folder</button>
-    </div>
-    <div id="folder-list">
+  <button class="menu-btn" type="button" aria-label="Open sidebar" aria-controls="sidebar" aria-expanded="false">☰</button>
+  <aside class="sidebar" id="sidebar" aria-label="Chats and folders">
+    <a class="brand" href="/"><span class="brand-icon" aria-hidden="true">t</span><span>transparent<span class="brand-sub">A little clarity, every conversation.</span></span></a>
+    <button class="btn new-conversation" hx-post="/start" hx-target="#folder-list" hx-swap="innerHTML"><span aria-hidden="true">＋</span> New chat <span class="shortcut">⌘ / Ctrl K</span></button>
+    <label class="search-box"><span aria-hidden="true">⌕</span><input type="search" id="chat-search" placeholder="Find a chat…" aria-label="Search chats and folders"></label>
+    <div class="sidebar-heading"><span>Your workspace</span><button class="btn-mini" hx-post="/folders" hx-vals='{"name":"New Folder"}' hx-target="#folder-list" hx-swap="innerHTML" aria-label="Create folder">＋ Folder</button></div>
+    <nav id="folder-list" aria-label="Folders">
       {% set current_session_id = current_session.id if current_session else none %}
+      {% set current_folder_id = current_folder.id if current_folder else none %}
       {% include "_folder_list.html" %}
-    </div>
+    </nav>
+    <div class="sidebar-footer"><span class="status-dot"></span> Your conversations, saved <span class="muted">Powered by Ollama</span></div>
   </aside>
-  <main class="main">
+  <main class="main" id="main-content">
     <div id="chat-surface">
-      {% set folder = current_folder %}
-      {% set session = current_session %}
+      {% set folder = current_folder %}{% set session = current_session %}
       {% include "_chat_surface.html" %}
     </div>
   </main>
-  <div class="scrim" aria-hidden="true"></div>
+  <button class="scrim" type="button" aria-label="Close sidebar" tabindex="-1"></button>
 </div>
 {% endblock %}

@@ -1,8 +1,13 @@
 {% set visible = messages | rejectattr('role', 'equalto', 'system') | list %}
+{% set latest = last_message(session.id) %}
 {% for message in visible %}
-{% set is_last = loop.last %}
+{% if message.role == 'generation' %}
+{{ generation_bubble(request, session, message.job, connect=message.connect) | safe }}
+{% else %}
+{% set is_last = latest and message.id == latest.id %}
 {% include "_message_bubble.html" %}
+{% endif %}
 {% endfor %}
 {% if not visible %}
-<p class="muted">No messages yet.</p>
+<div class="conversation-empty"><span class="welcome-mark" aria-hidden="true">{{ '✎' if folder.type == 'memo' else 't' }}</span><h2>{{ 'A place for your thoughts.' if folder.type == 'memo' else 'Ready when you are.' }}</h2><p>{{ 'Write your first note below. It stays out of model conversations.' if folder.type == 'memo' else 'Paste your text below to begin translating.' if folder.type == 'translation' else 'Start with a question, a rough idea, or something you’re working on.' }}</p></div>
 {% endif %}

@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   folder_id INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
   title TEXT NOT NULL DEFAULT 'New Chat',
+  auto_title INTEGER NOT NULL DEFAULT 1,
   model TEXT NOT NULL DEFAULT 'gemma4:31b',
   params_json TEXT NOT NULL DEFAULT '{}',
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -101,6 +102,11 @@ def init_db() -> None:
         cols = {row["name"] for row in conn.execute("PRAGMA table_info(sessions)")}
         if "params_updated_at" not in cols:
             conn.execute("ALTER TABLE sessions ADD COLUMN params_updated_at TEXT")
+        if "auto_title" not in cols:
+            conn.execute("ALTER TABLE sessions ADD COLUMN auto_title INTEGER NOT NULL DEFAULT 1")
+            for row in conn.execute("SELECT id, title FROM sessions").fetchall():
+                conn.execute("UPDATE sessions SET auto_title = ? WHERE id = ?",
+                             (_is_default_title(row["title"]), row["id"]))
         folder_cols = {row["name"] for row in conn.execute("PRAGMA table_info(folders)")}
         if "type" not in folder_cols:
             conn.execute("ALTER TABLE folders ADD COLUMN type TEXT NOT NULL DEFAULT 'chat'")
@@ -117,6 +123,9 @@ def init_db() -> None:
                 conn.execute(f"ALTER TABLE messages ADD COLUMN {col} INTEGER")
         if "system_prompt_hash" not in msg_cols:
             conn.execute("ALTER TABLE messages ADD COLUMN system_prompt_hash TEXT")
+        # Backfill labels without making old conversations look newly modified.
+        for row in conn.execute("SELECT id FROM sessions WHERE auto_title = 1").fetchall():
+            _refresh_auto_title(conn, row["id"])
         conn.commit()
 
 
@@ -217,6 +226,34 @@ def set_folder_type(folder_id: int, folder_type: str) -> dict | None:
 # --- sessions ------------------------------------------------------------
 
 
+def _is_default_title(title: str | None) -> bool:
+    return not title or title.strip().casefold() in ("", "new chat")
+
+
+def _refresh_auto_title(conn: sqlite3.Connection, session_id: int) -> None:
+    """Derive a stable label from the first input; never overwrite a manual title."""
+    session = conn.execute("SELECT auto_title FROM sessions WHERE id = ?", (session_id,)).fetchone()
+    if session is None or not session["auto_title"]:
+        return
+    first = conn.execute(
+        "SELECT id, content FROM messages WHERE session_id = ? AND role IN ('user', 'memo') ORDER BY id LIMIT 1",
+        (session_id,),
+    ).fetchone()
+    content = first["content"] if first else ""
+    if first:
+        # Translation chunks belong to one submission, even with tiny chunk limits.
+        batch = conn.execute("SELECT batch_id FROM generations WHERE user_message_id = ?", (first["id"],)).fetchone()
+        if batch and batch["batch_id"] is not None:
+            content = "".join(row["content"] for row in conn.execute(
+                "SELECT m.content FROM messages m JOIN generations g ON g.user_message_id = m.id"
+                " WHERE g.session_id = ? AND g.batch_id = ? ORDER BY m.id", (session_id, batch["batch_id"])))
+    title = " ".join(content.split())
+    if len(title) > 60:
+        title = title[:59].rstrip() + "…"
+    title = title or f"New chat #{session_id}"
+    conn.execute("UPDATE sessions SET title = ? WHERE id = ?", (title, session_id))
+
+
 def list_sessions(folder_id: int) -> list[dict]:
     with _lock:
         rows = _get_conn().execute(
@@ -274,9 +311,10 @@ def create_session(
         params_json = src["params_json"] if src is not None else json.dumps(DEFAULT_PARAMS)
     with _lock:
         cur = _get_conn().execute(
-            "INSERT INTO sessions (folder_id, title, model, params_json) VALUES (?, ?, ?, ?)",
-            (folder_id, title, model, params_json),
+            "INSERT INTO sessions (folder_id, title, auto_title, model, params_json) VALUES (?, ?, ?, ?, ?)",
+            (folder_id, title, _is_default_title(title), model, params_json),
         )
+        _refresh_auto_title(_get_conn(), cur.lastrowid)
         _get_conn().commit()
         row = _get_conn().execute(
             "SELECT * FROM sessions WHERE id = ?", (cur.lastrowid,)
@@ -289,12 +327,17 @@ def update_session(session_id: int, **fields) -> dict | None:
         return get_session(session_id)
     if fields.keys() - {"title", "model", "params_json", "params_updated_at"}:
         raise ValueError("Unsupported session field")
+    if "title" in fields:
+        fields["title"] = fields["title"].strip()
+        fields["auto_title"] = not fields["title"]
     cols = ", ".join(f"{k} = ?" for k in fields)
     with _lock:
         _get_conn().execute(
             f"UPDATE sessions SET {cols}, updated_at = datetime('now') WHERE id = ?",
             (*fields.values(), session_id),
         )
+        if "title" in fields:
+            _refresh_auto_title(_get_conn(), session_id)
         _get_conn().commit()
         row = _get_conn().execute(
             "SELECT * FROM sessions WHERE id = ?", (session_id,)
@@ -370,6 +413,7 @@ def add_message(
             "UPDATE sessions SET updated_at = datetime('now') WHERE id = ?",
             (session_id,),
         )
+        _refresh_auto_title(_get_conn(), session_id)
         _get_conn().commit()
         row = _get_conn().execute(
             "SELECT * FROM messages WHERE id = ?", (cur.lastrowid,)
@@ -507,10 +551,8 @@ def enqueue_turns(session_id: int, chunks: list[str]) -> list[dict]:
                  json.dumps(messages), prompt_hash, ids[0] if ids else user_id),
             )
             ids.append(user_id)
-        title = session["title"]
-        if title == "New Chat":
-            title = " ".join(chunks[0].split())[:60]
-        conn.execute("UPDATE sessions SET title = ?, updated_at = datetime('now') WHERE id = ?", (title, session_id))
+        _refresh_auto_title(conn, session_id)
+        conn.execute("UPDATE sessions SET updated_at = datetime('now') WHERE id = ?", (session_id,))
         return [dict(conn.execute("SELECT * FROM messages WHERE id = ?", (uid,)).fetchone()) for uid in ids]
 
 
@@ -538,6 +580,8 @@ def delete_last_message(session_id: int, message_id: int) -> bool:
         if row[0] != message_id:
             return False
         conn.execute("DELETE FROM messages WHERE id = ? AND session_id = ?", (message_id, session_id))
+        _refresh_auto_title(conn, session_id)
+        conn.execute("UPDATE sessions SET updated_at = datetime('now') WHERE id = ?", (session_id,))
         return True
 
 
@@ -599,10 +643,12 @@ def interrupt_generations(session_id: int, error: str, status: str = "failed", j
             current = conn.execute("SELECT status, attempt FROM generations WHERE user_message_id = ?", (job["user_message_id"],)).fetchone()
             if current is None or current["status"] != "running" or current["attempt"] != job["attempt"]:
                 return
-        conn.execute(
+        changed = conn.execute(
             "UPDATE generations SET status = ?, error = ? WHERE session_id = ? AND status IN ('queued', 'running')",
             (status, error, session_id),
-        )
+        ).rowcount
+        if changed:
+            conn.execute("UPDATE sessions SET updated_at = datetime('now') WHERE id = ?", (session_id,))
 
 
 def retry_generations(session_id: int) -> bool:
@@ -621,4 +667,5 @@ def retry_generations(session_id: int) -> bool:
             " WHERE session_id = ? AND batch_id = ? AND status IN ('failed', 'cancelled')",
             (session_id, last_job["batch_id"]),
         )
+        conn.execute("UPDATE sessions SET updated_at = datetime('now') WHERE id = ?", (session_id,))
         return True

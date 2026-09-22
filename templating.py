@@ -1,6 +1,7 @@
 """Jinja2 templates + fragment helpers shared by app and routers."""
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi.templating import Jinja2Templates
@@ -28,6 +29,16 @@ def _from_json(value: str) -> dict:
 
 
 templates.env.filters["from_json"] = _from_json
+
+
+def _utc_iso(value: str) -> str:
+    date = datetime.fromisoformat(value)
+    if date.tzinfo is None:
+        date = date.replace(tzinfo=timezone.utc)
+    return date.isoformat()
+
+
+templates.env.filters["utc_iso"] = _utc_iso
 
 
 def _sort_models(models: list[str], usage: dict[str, int]) -> list[str]:
@@ -123,3 +134,8 @@ def chat_surface_fragment(request, folder, session, oob=False) -> str:
     )
     attr = ' hx-swap-oob="true"' if oob else ""
     return f'<div id="chat-surface"{attr}>{inner}</div>'
+
+
+def session_sidebar(request, session: dict) -> str:
+    sidebar = folder_list_inner(request, session["folder_id"], session["id"])
+    return f'<div id="folder-list" hx-swap-oob="innerHTML">{sidebar}</div>'

@@ -7,7 +7,7 @@
   <div class="chat-title">
     <div class="eyebrow">{{ folder.name }} <span>/ {{ folder.type }}</span></div>
     <form hx-post="/sessions/{{ session.id }}/rename" hx-target="#folder-list" hx-swap="innerHTML" hx-trigger="submit, change" class="inline-form">
-      <input type="text" name="title" value="{{ session.title }}" class="title-input" aria-label="Chat title" maxlength="200">
+      <input type="text" name="title" value="{{ session.title }}" class="title-input" aria-label="Chat title" maxlength="200" title="Rename this chat, or clear to use the first message automatically">
     </form>
   </div>
   <button class="btn-mini" type="button" id="copy-all-btn">Copy chat</button>

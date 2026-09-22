@@ -80,6 +80,71 @@ class AppTests(unittest.TestCase):
         self.assertEqual(json.loads(job["params_json"])["temperature"], .95)
         self.assertEqual(db.get_session(self.sid)["title"], "Hello")
 
+    def test_empty_chats_have_unique_titles_and_first_input_is_normalized(self):
+        other = db.create_session(self.folder["id"])
+        self.assertEqual(self.session["title"], f"New chat #{self.sid}")
+        self.assertNotEqual(other["title"], self.session["title"])
+        self.send("  First\n\tmessage   with  spacing  ")
+        self.assertEqual(db.get_session(self.sid)["title"], "First message with spacing")
+        self.finish()
+        self.send("A different topic")
+        self.assertEqual(db.get_session(self.sid)["title"], "First message with spacing")
+
+    def test_automatic_title_truncates_unicode_and_spans_translation_chunks(self):
+        db.set_folder_type(self.folder["id"], "translation")
+        db.update_folder(self.folder["id"], "Translations", "", chunk_limit=5)
+        self.send("한글🙂" * 30)
+        title = db.get_session(self.sid)["title"]
+        self.assertEqual(title, ("한글🙂" * 30)[:59] + "…")
+        self.assertEqual(len(title), 60)
+
+    def test_manual_title_survives_messages_and_blank_rename_restores_auto(self):
+        path = f"/sessions/{self.sid}/rename"
+        self.assertEqual(self.client.post(path, data={"title": "My project"}).status_code, 200)
+        self.send("First input")
+        self.finish()
+        self.assertEqual(db.get_session(self.sid)["title"], "My project")
+        self.assertEqual(self.client.post(path, data={"title": ""}).status_code, 200)
+        self.assertEqual(db.get_session(self.sid)["title"], "First input")
+        self.send("Second input")
+        self.assertEqual(db.get_session(self.sid)["title"], "First input")
+        self.client.post(path, data={"title": "New Chat"})
+        db.init_db()
+        self.assertEqual(db.get_session(self.sid)["title"], "New Chat")
+
+    def test_note_title_and_delete_reset_title_and_update_date(self):
+        db.set_folder_type(self.folder["id"], "memo")
+        self.client.post(f"/sessions/{self.sid}/memo", data={"content": "A saved\n note"})
+        self.assertEqual(db.get_session(self.sid)["title"], "A saved note")
+        mid = db.last_message(self.sid)["id"]
+        with db._lock, db._conn as conn:
+            conn.execute("UPDATE sessions SET updated_at = '2000-01-01 00:00:00' WHERE id = ?", (self.sid,))
+        response = self.client.post(f"/sessions/{self.sid}/messages/{mid}/delete")
+        session = db.get_session(self.sid)
+        self.assertEqual(session["title"], f"New chat #{self.sid}")
+        self.assertGreater(session["updated_at"], "2000-01-01 00:00:00")
+        self.assertIn(f'datetime="{session["updated_at"].replace(" ", "T")}+00:00"', response.text)
+
+    def test_updated_date_reconciles_after_generation_and_settings(self):
+        self.send()
+        self.finish()
+        job = db.list_generations(self.sid)[0]
+        response = self.client.get(f'/sessions/{self.sid}/stream?since={job["user_message_id"]}')
+        self.assertIn('id="folder-list" hx-swap-oob="innerHTML"', response.text)
+        self.assertIn('class="session-modified"', response.text)
+        response = self.client.post(f"/sessions/{self.sid}/model", data={"model": "other-model"})
+        self.assertIn('class="session-modified"', response.text)
+
+    def test_stop_and_retry_update_last_modification(self):
+        self.send()
+        for action in ("stop", "retry"):
+            with db._lock, db._conn as conn:
+                conn.execute("UPDATE sessions SET updated_at = '2000-01-01 00:00:00' WHERE id = ?", (self.sid,))
+            response = self.client.post(f"/sessions/{self.sid}/{action}")
+            self.assertEqual(response.status_code, 200)
+            self.assertGreater(db.get_session(self.sid)["updated_at"], "2000-01-01 00:00:00")
+            self.assertIn('class="session-modified"', response.text)
+
     def test_no_prompt_remains_no_prompt_in_viewer(self):
         db.update_folder(self.folder["id"], "Personal", "")
         self.send()
@@ -344,6 +409,13 @@ class MigrationTests(unittest.TestCase):
                     INSERT INTO folders VALUES (1, 'Old notes', 'Keep this prompt', 1, '2026-01-01');
                     INSERT INTO sessions VALUES (1, 1, 'Old chat', 'test-model', '{}', '2026-01-01', '2026-01-01');
                     INSERT INTO messages VALUES (1, 1, 'memo', 'A saved note', NULL, NULL, NULL, '2026-01-01');
+                    INSERT INTO sessions VALUES (2, 1, 'New Chat', 'test-model', '{}', '2026-01-01', '2026-02-03');
+                    INSERT INTO messages VALUES (2, 2, 'system', 'Not a title', NULL, NULL, NULL, '2026-01-01');
+                    INSERT INTO messages VALUES (3, 2, 'user', '  First   old input  ', NULL, NULL, NULL, '2026-01-01');
+                    INSERT INTO messages VALUES (4, 2, 'user', 'Later input', NULL, NULL, NULL, '2026-01-01');
+                    INSERT INTO sessions VALUES (3, 1, NULL, 'test-model', '{}', '2026-01-01', '2026-01-01');
+                    INSERT INTO messages VALUES (5, 3, 'memo', 'Old note', NULL, NULL, NULL, '2026-01-01');
+                    INSERT INTO sessions VALUES (4, 1, '   ', 'test-model', '{}', '2026-01-01', '2026-01-01');
                 """)
             with patch.object(db, "DB_PATH", path), patch.object(db, "_conn", None):
                 try:
@@ -353,6 +425,11 @@ class MigrationTests(unittest.TestCase):
                     self.assertEqual(db.get_folder(1)["system_prompt"], "Keep this prompt")
                     self.assertEqual(db.list_messages(1)[0]["content"], "A saved note")
                     self.assertEqual(db.list_generations(1), [])
+                    self.assertEqual(db.get_session(1)["title"], "Old chat")
+                    self.assertEqual(db.get_session(2)["title"], "First old input")
+                    self.assertEqual(db.get_session(2)["updated_at"], "2026-02-03")
+                    self.assertEqual(db.get_session(3)["title"], "Old note")
+                    self.assertEqual(db.get_session(4)["title"], "New chat #4")
                 finally:
                     db._conn.close()
 

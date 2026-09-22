@@ -67,7 +67,7 @@ try {
   const systemChromium = '/Applications/Chromium.app/Contents/MacOS/Chromium';
   const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || (existsSync(systemChromium) ? systemChromium : undefined);
   browser = await chromium.launch({ headless: process.env.HEADED !== '1', executablePath });
-  const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, locale: 'en-US', timezoneId: 'Asia/Seoul' });
   const page = await context.newPage();
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
@@ -80,11 +80,20 @@ try {
   const sessionId = await page.locator('#active-session').inputValue();
   const chatURL = page.url();
   check('first-use flow creates a chat', !!sessionId);
+  check('empty chat has a distinguishable numbered title', await page.getByLabel('Chat title', { exact: true }).inputValue() === `New chat #${sessionId}`);
   check('CSS and JavaScript URLs are versioned', await page.locator('link[rel=stylesheet]').getAttribute('href').then(href => href.includes('?v=')));
 
-  await page.locator('.composer textarea').fill('[slow] Browser stop regression');
+  const firstInput = '[slow] Browser stop regression\n  한글🙂 A long first message that should be truncated automatically without asking a model';
+  const automaticTitle = Array.from(firstInput.replace(/\s+/g, ' ').trim()).slice(0, 59).join('').trimEnd() + '…';
+  await page.locator('.composer textarea').fill(firstInput);
   await page.locator('.composer textarea').press('Enter');
   await page.locator('.streaming .content span').waitFor();
+  await settle(page);
+  const sentAt = await page.locator('.session-item.active time').getAttribute('datetime');
+  check('first message becomes a normalized truncated title', await page.getByLabel('Chat title', { exact: true }).inputValue() === automaticTitle);
+  check('sidebar title excludes date metadata', await page.locator('.session-item.active .session-title').textContent() === automaticTitle);
+  const localDate = new Intl.DateTimeFormat('en-US', {timeZone: 'Asia/Seoul', year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'}).format(new Date(sentAt));
+  check('last-modified date uses local time from a UTC timestamp', sentAt.endsWith('+00:00') && await page.locator('.session-item.active time').textContent() === `Updated ${localDate}`);
   await page.locator('.btn-stop').click();
   await settle(page);
   check('Stop restores Send', await page.locator('.composer button[type=submit]').isEnabled());
@@ -101,6 +110,24 @@ try {
   check('retry finishes without duplicating the response', await page.locator('.message.assistant:not([data-generation-status])').count() === 1);
   check('literal model HTML remains inert', await page.evaluate(() => !window.unsafeExecuted));
   check('output indentation is preserved', (await page.locator('.message.assistant:not([data-generation-status]) .content').textContent()).includes('\n    indented  code'));
+  check('later messages leave the first-message title intact', await page.getByLabel('Chat title', { exact: true }).inputValue() === automaticTitle);
+  check('completed response refreshes sidebar modification time', new Date(await page.locator('.session-item.active time').getAttribute('datetime')) > new Date(sentAt));
+
+  await page.getByLabel('Chat title', { exact: true }).fill('My manually named project');
+  await page.getByLabel('Chat title', { exact: true }).press('Tab');
+  await settle(page);
+  await page.locator('.composer textarea').fill('[instant] Keep my manual title');
+  await page.locator('.composer textarea').press('Enter');
+  await finished(page);
+  check('manual title survives a new message', await page.locator('.session-item.active .session-title').textContent() === 'My manually named project');
+  await page.getByLabel('Chat title', { exact: true }).fill('');
+  await page.getByLabel('Chat title', { exact: true }).press('Enter');
+  await settle(page);
+  check('clearing title with Enter immediately restores automatic label', await page.getByLabel('Chat title', { exact: true }).inputValue() === automaticTitle);
+  await page.locator('#chat-search').fill('한글🙂');
+  check('title search works with date metadata', await page.locator('.session-item:visible').count() === 1);
+  await page.locator('#chat-search').fill('');
+  await page.screenshot({ path: path.join(artifacts, 'titles-desktop.png'), scale: 'css' });
 
   const draft = 'Draft survives\npage changes';
   await page.locator('.composer textarea').fill(draft);
@@ -110,6 +137,8 @@ try {
   await settle(page);
   check('draft survives navigation', await page.locator('.composer textarea').inputValue() === draft);
   await page.reload();
+  await settle(page);
+  check('automatic title persists after reload', await page.getByLabel('Chat title', { exact: true }).inputValue() === automaticTitle);
   check('draft survives reload', await page.locator('.composer textarea').inputValue() === draft);
 
   await page.locator('.params-toggle > summary').click();

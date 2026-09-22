@@ -91,7 +91,7 @@
       const folderMatches = $('.folder-name', folder).textContent.toLowerCase().includes(query);
       let matches = 0;
       $$('.session-item', folder).forEach(item => {
-        const match = !query || folderMatches || $('.session-link', item).textContent.toLowerCase().includes(query);
+        const match = !query || folderMatches || $('.session-title', item).textContent.toLowerCase().includes(query);
         item.hidden = !match;
         if (match) matches++;
       });
@@ -142,8 +142,20 @@
       history.replaceState(history.state, '', id ? `/?session=${id}` : '/');
     }
     const title = $('.title-input');
-    const active = $('.session-item.active .session-link');
+    const active = $('.session-item.active .session-title');
     if (title && active && document.activeElement !== title) title.value = active.textContent;
+    $$('.session-modified').forEach(element => {
+      if (element.dataset.formatted === element.dateTime) return;
+      const date = new Date(element.dateTime);
+      if (Number.isNaN(date.getTime())) return;
+      element.textContent = 'Updated ' + new Intl.DateTimeFormat(undefined, {
+        year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+      }).format(date);
+      element.title = 'Last modified: ' + new Intl.DateTimeFormat(undefined, {
+        dateStyle: 'full', timeStyle: 'long',
+      }).format(date);
+      element.dataset.formatted = element.dateTime;
+    });
     filterChats();
     syncMessages();
   }
@@ -229,6 +241,8 @@
   });
   document.body.addEventListener('htmx:beforeRequest', event => {
     const form = event.detail.elt;
+    const title = $('.title-input', form);
+    if (title) form._submittedTitle = title.value;
     if (form.matches('form.composer')) {
       if ($('.streaming') || !$('textarea', form).value.trim()) { event.preventDefault(); return; }
       form._submittedDraft = $('textarea', form).value;
@@ -237,6 +251,11 @@
   });
   document.body.addEventListener('htmx:afterRequest', event => {
     const form = event.detail.elt;
+    const title = $('.title-input', form);
+    const savedTitle = $('.session-item.active .session-title');
+    if (event.detail.successful && title && savedTitle && title.value === form._submittedTitle) {
+      title.value = savedTitle.textContent;
+    }
     if (event.detail.successful && form.matches('form.composer')) {
       const textarea = $('textarea', form);
       if (textarea.value === form._submittedDraft) {

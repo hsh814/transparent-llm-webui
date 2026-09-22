@@ -7,8 +7,12 @@
        hx-swap="outerHTML"
        hx-push-url="/?session={{ session.id }}"
        aria-current="{{ 'page' if session.id == current_session_id else 'false' }}"
+       aria-label="{{ session.title }}"
        title="{{ session.title }}"
-       class="session-link">{{ session.title }}</a>
+       class="session-link"><span class="session-title">{{ session.title }}</span>
+      <time class="session-modified" datetime="{{ session.updated_at|utc_iso }}"
+            title="Last modified: {{ session.updated_at }} UTC">Updated {{ session.updated_at }} UTC</time>
+    </a>
     <button class="btn-mini delete-session" aria-label="Delete {{ session.title }}"
             hx-post="/sessions/{{ session.id }}/delete"
             hx-target="#folder-list"

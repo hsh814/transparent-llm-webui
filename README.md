@@ -24,7 +24,8 @@ Open `http://localhost:8000`. An API key is required at startup. Run **one appli
 
 - **New chat** starts a conversation in the current folder, creating a Personal folder on first use. `⌘/Ctrl K` does the same.
 - Search the sidebar to find a chat or folder. Pin frequently used folders using the star.
-- Titles are generated from the first message. Click a title to rename it; changes save on blur or Enter.
+- Titles use the first message or note, with whitespace normalized and a 60-character limit (including an ellipsis when truncated). No model call is needed. Empty chats get unique numbered labels. Click a title to rename it; changes save on blur or Enter. Clear it to restore the automatic title. Existing unnamed chats are backfilled on startup without changing their modification dates.
+- Each sidebar chat shows its last-modified date and time in your browser's timezone; hover the date for the full timestamp. Sending, receiving, renaming, changing settings, stopping/retrying, and deleting messages refresh it.
 - Use the folder menu to choose **Chat**, **Memo**, or **Translation**. Folder settings contain the name and system prompt, plus the translation chunk size.
 - The current model stays in the header. Open **Settings** to adjust reasoning effort, temperature, top P, maximum output tokens, or the random seed; click **Apply** to save.
 - A configured system prompt is shown above the conversation. It is sent verbatim. Empty prompts add no system message.

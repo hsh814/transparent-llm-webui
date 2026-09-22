@@ -33,11 +33,11 @@ def create_session(request: Request, folder_id: int):
 
 
 @router.post("/sessions/{session_id}/rename", response_class=HTMLResponse)
-def rename_session(request: Request, session_id: int, title: str = Form(...)):
+def rename_session(request: Request, session_id: int, title: str = Form("", max_length=200)):
     session = db.get_session(session_id)
     if session is None:
         return HTMLResponse("", status_code=404)
-    db.rename_session(session_id, title.strip() or "New Chat")
+    db.rename_session(session_id, title)
     return templating.folder_list_inner(
         request, current_folder_id=session["folder_id"], current_session_id=session_id
     )
@@ -111,9 +111,9 @@ def update_model_params(
     )
     if request.headers.get("HX-Target") == "params-panel":
         selector = selector.replace('id="model-selector"', 'id="model-selector" hx-swap-oob="true"', 1)
-        return HTMLResponse(panel + selector, headers={"HX-Trigger": "settingsSaved"})
+        return HTMLResponse(panel + selector + templating.session_sidebar(request, session), headers={"HX-Trigger": "settingsSaved"})
     panel = panel.replace('id="params-panel"', 'id="params-panel" hx-swap-oob="true"', 1)
-    return HTMLResponse(selector + panel, headers={"HX-Trigger": "settingsSaved"})
+    return HTMLResponse(selector + panel + templating.session_sidebar(request, session), headers={"HX-Trigger": "settingsSaved"})
 
 
 @router.post("/sessions/{session_id}/model/refresh", response_class=HTMLResponse)

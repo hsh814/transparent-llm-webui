@@ -59,6 +59,8 @@ input[type="range"] { accent-color: var(--accent); width: 100%; }
 .session-item:hover { background: #e5ebe3; }
 .session-link { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--muted); text-decoration: none; font-size: 12px; }
 .session-item.active .session-link { color: #294e3b; font-weight: 600; }
+.session-title { display: block; overflow: hidden; text-overflow: ellipsis; }
+.session-modified { display: block; margin-top: 3px; font-size: 10px; font-weight: 400; color: var(--muted); }
 .delete-session { border: 0; opacity: 0; padding: 1px 5px; }
 .session-item:hover .delete-session, .session-item:focus-within .delete-session { opacity: 1; }
 .delete-session:hover, .delete-message:hover, .danger, .btn-stop { color: var(--danger); }

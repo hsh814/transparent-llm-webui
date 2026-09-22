@@ -1,5 +1,14 @@
 # Browser QA inventory
 
+## Automatic title / last-modified follow-up
+
+- Requirements: unique empty-chat labels; deterministic first-input titles, normalized whitespace and 60-character truncation; preserve manual titles; clearing a title restores automatic mode; backfill legacy unnamed chats without changing their dates.
+- Controls/states: create, send, rename, clear, search, reload; timestamps must reconcile after completed/stopped/retried responses, note saves, deletions, and settings changes. Backend tests cover migration and tiny translation chunks.
+- Browser checks: title in header/sidebar agrees, later messages do not replace it, manual/automatic round trip persists, UTC timestamps display in the browser timezone and refresh after completion. Inspect desktop long-title state and 320px drawer screenshots for visible dates and no overlap/overflow.
+- Exploratory cases: a cleared title and Unicode/multiline content; filtering by title after adding date labels. Keep all tests on an isolated database with simulated replies.
+- Results: 33 backend tests and 35 repeatable browser checks passed. A persistent headed Node/Playwright session additionally exercised Unicode/multiline input, manual rename, clearing with Enter, numbered empty chats, title search, and the 320px drawer. The Enter check found and fixed a focused header input staying blank after the sidebar had restored its automatic title.
+- Reviewed follow-up screenshots: `test-results/browser-DFW4dw/titles-desktop.png`, `test-results/browser-DFW4dw/mobile-drawer.png`, and `/private/tmp/transparent-titles.qDRjUM/mobile-titles.png`. Titles and local dates remain legible without overlap; viewport checks pass. Browser/server cleanup completed; tests did not use the user's database. Legacy backfill takes effect on application restart.
+
 Status: browser verification completed on 2026-09-22 using Chromium, a temporary database, and simulated model responses.
 
 The playwright-interactive skill is the intended workflow. This Codex installation reports its required `js_repl` feature as removed, so this run uses persistent Playwright handles in a Node REPL instead.

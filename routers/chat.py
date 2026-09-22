@@ -58,7 +58,7 @@ def _bubble(request: Request, session: dict, message: dict) -> str:
 def _usage(request: Request, session: dict) -> str:
     return templating.templates.env.get_template("_session_usage.html").render(
         request=request, session=session, total=db.session_token_total(session["id"]), oob=True,
-    )
+    ) + templating.session_sidebar(request, session)
 
 
 def _messages(request: Request, session: dict) -> str:
@@ -150,7 +150,7 @@ def retry_generation(request: Request, session_id: int):
     except db.GenerationBusy as exc:
         raise HTTPException(409, str(exc)) from exc
     generation.start(session_id)
-    return _messages(request, session)
+    return _messages(request, session) + templating.session_sidebar(request, session)
 
 
 @router.post("/sessions/{session_id}/translate", response_class=HTMLResponse)
@@ -172,8 +172,6 @@ def post_memo(request: Request, session_id: int, content: str = Form(...)):
     if not content.strip():
         raise HTTPException(400, "Write a note first.")
     row = db.add_message(session_id, "memo", content.strip())
-    if session["title"] == "New Chat":
-        db.rename_session(session_id, " ".join(content.split())[:60])
     sidebar = templating.folder_list_inner(request, session["folder_id"], session_id)
     return _bubble(request, session, row) + f'<div id="folder-list" hx-swap-oob="innerHTML">{sidebar}</div>'
 

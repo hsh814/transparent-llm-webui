@@ -33,7 +33,7 @@ Open `http://localhost:8000`. An API key is required at startup. Run **one appli
 - Drafts are stored per chat in browser local storage and cleared only after a successful submission. They survive navigation and reloads, including failed sends.
 - **Stop** stops accepting response output and cancels queued translation chunks. Partial output remains visible. **Retry with original settings** retries the latest unfinished submission using its stored request. A stopped upstream connection closes when the worker next receives data or times out.
 - Reading earlier messages does not force-scroll to the bottom. **Latest message** returns to the newest output. The composer stays visible on mobile.
-- Each assistant message has **Copy** and **Prompt** actions. Prompt opens the saved request and settings, including responses without token usage. **Copy chat** copies the displayed conversation.
+- Each assistant message has **Copy** and **Prompt** actions. Prompt opens a scrollable plain-text view of the saved API messages, preserving line breaks and indentation, with role headings. **Show JSON** optionally reveals the ordered messages array and **Copy messages JSON** copies it without headings or the response. The model and expandable saved generation settings are shown separately. **Copy chat** copies the displayed conversation.
 - Links to `/?session=<id>` open a complete page and survive reloads and browser navigation.
 
 ### Folder modes

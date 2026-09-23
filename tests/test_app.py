@@ -8,6 +8,7 @@ from contextlib import ExitStack
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from html import unescape
 from html.parser import HTMLParser
 from unittest.mock import patch
 
@@ -60,6 +61,45 @@ class AppTests(unittest.TestCase):
         job = db.claim_generation(self.sid)
         db.finish_generation(job, text, reasoning, usage)
         return db.get_generation(self.sid, job["user_message_id"])
+
+    def prompt_messages(self, response):
+        self.assertEqual(response.status_code, 200)
+        text = response.text.split('<pre id="prompt-messages">', 1)[1].split("</pre>", 1)[0]
+        return json.loads(unescape(text))
+
+    def test_prompt_json_matches_outgoing_messages_after_settings_change(self):
+        for mode in ("chat", "translation"):
+            with self.subTest(mode=mode):
+                folder = db.create_folder("Fidelity", "  System\r\n\t日本語 <>& \"quoted\"  ", mode, 10000)
+                session = db.create_session(folder["id"], model="test-model")
+                sid = session["id"]
+                db.add_message(sid, "memo", "Private note: never send")
+                db.add_message(sid, "user", "Earlier question")
+                db.add_message(sid, "assistant", "Earlier answer")
+                source = "Literal </pre><script>unsafe()</script>\n\t  indented\r\nEnd"
+                self.client.post(f"/sessions/{sid}/send", data={"content": source})
+                captured = []
+
+                def respond(request):
+                    captured.append(json.loads(request.content))
+                    return httpx.Response(200, text='data: {"choices":[{"delta":{"content":"Answer"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n')
+
+                with patch.object(ollama, "_client", side_effect=lambda: httpx.Client(
+                    base_url="https://example.test/v1", transport=httpx.MockTransport(respond)
+                )):
+                    generation._generate(db.claim_generation(sid))
+                job = db.list_generations(sid)[0]
+                self.assertEqual(job["status"], "completed")
+                db.update_folder(folder["id"], "Changed", "Different system prompt")
+                db.set_folder_type(folder["id"], "memo")
+                db.update_session(sid, model="other-model", params_json='{"temperature":0}')
+                response = self.client.get(f'/sessions/{sid}/messages/{job["assistant_message_id"]}/prompt')
+                displayed = self.prompt_messages(response)
+                self.assertEqual(displayed, captured[0]["messages"])
+                self.assertEqual(displayed[0]["content"], folder["system_prompt"])
+                self.assertEqual(displayed[-1]["content"], source)
+                self.assertEqual([m["role"] for m in displayed],
+                                 ["system", "user", "assistant", "user"] if mode == "chat" else ["system", "user"])
 
     def test_first_visit_and_direct_links_render_full_pages(self):
         for path in ("/", f"/sessions/{self.sid}", f"/?session={self.sid}"):
@@ -151,8 +191,7 @@ class AppTests(unittest.TestCase):
         job = self.finish()
         db.update_folder(self.folder["id"], "Personal", "DO NOT RETROACTIVELY ADD")
         response = self.client.get(f'/sessions/{self.sid}/messages/{job["assistant_message_id"]}/prompt')
-        self.assertNotIn("DO NOT RETROACTIVELY ADD", response.text)
-        self.assertIn("Exact messages saved", response.text)
+        self.assertEqual(self.prompt_messages(response), [{"role": "user", "content": "Hello"}])
 
     def test_overlapping_sends_are_atomic(self):
         def submit(_):
@@ -204,7 +243,7 @@ class AppTests(unittest.TestCase):
         self.assertEqual([m["role"] for m in visible], ["user", "assistant"] * len(jobs))
         for index, job in enumerate(db.list_generations(self.sid)):
             response = self.client.get(f'/sessions/{self.sid}/messages/{job["assistant_message_id"]}/prompt')
-            self.assertIn("Exact messages saved", response.text)
+            self.assertEqual(self.prompt_messages(response), json.loads(job["messages_json"]))
             self.assertEqual(visible[index * 2]["content"], json.loads(job["messages_json"])[-1]["content"])
 
     def test_translation_uses_one_event_source(self):

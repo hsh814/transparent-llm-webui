@@ -1,51 +1,29 @@
 {% extends "base.html" %}
 {% block title %}Prompt · {{ session.title }}{% endblock %}
 {% block body %}
-<div class="prompt-viewer">
-  <div class="prompt-header">
-    <div class="prompt-title">
-      <a class="back-link" href="/sessions/{{ session.id }}">← Back to chat</a>
-      <h1>{{ session.title }}</h1>
-      <span class="badge">{{ message.model }}{% if message.reasoning_effort %} · effort: {{ message.reasoning_effort }}{% endif %}</span>
-    </div>
-    <button class="btn-mini" type="button" id="copy-all-btn">Copy all</button>
-  </div>
-  <p class="muted">{{ 'Exact messages saved when this request was submitted, in the order sent to the model.' if recorded else 'Reconstructed messages for this legacy response.' }}</p>
-  {% if request_params %}<details class="request-params"><summary>Request settings</summary><pre>{{ request_params | tojson(indent=2) }}</pre></details>{% endif %}
-  {% if sys_note %}
-  <p class="muted sys-note">{{ sys_note }}</p>
+<main class="prompt-viewer">
+  <a href="/sessions/{{ session.id }}">Back to chat</a>
+  <h1>Prompt</h1>
+  <p>{{ 'Exact messages saved when this request was submitted, in the order sent to the Ollama API.' if recorded else 'Reconstructed messages — the exact original request is unavailable.' }}</p>
+  {% if sys_note %}<p>{{ sys_note }}</p>{% endif %}
+  <p>Model: <code>{{ message.model }}</code></p>
+  <p>Message roles are shown as headings. The text below each heading is the message content, with its original line breaks and indentation.</p>
+  {% for m in messages %}
+  <section class="prompt-message">
+    <h2>{{ m.role }}</h2>
+    <pre><span>{{ m.content }}</span></pre>
+  </section>
+  {% endfor %}
+  <details>
+    <summary>Show JSON</summary>
+    <button class="btn-mini" type="button" id="copy-prompt-btn">Copy messages JSON</button>
+    <pre id="prompt-messages">{{ messages_json }}</pre>
+  </details>
+  {% if request_params is not none %}
+  <details>
+    <summary>Saved generation settings</summary>
+    <pre>{{ request_params | tojson(indent=2) }}</pre>
+  </details>
   {% endif %}
-  {% if chunk_note %}
-  <p class="muted sys-note">{{ chunk_note }}</p>
-  {% endif %}
-  <div class="message-list prompt-messages">
-    {% for m in messages %}
-    <div class="message {{ m.role }}">
-      <div class="message-meta">
-        <span class="role-label">{{ m.role }}</span>
-        {% if m.role == 'system' and not sys_note %}
-        <span class="badge">recorded for this turn</span>
-        {% endif %}
-      </div>
-      <div class="content">{{ m.content }}</div>
-    </div>
-    {% endfor %}
-  </div>
-  <div class="prompt-response">
-    <div class="prompt-response-head">
-      <span class="role-label">Model response</span>
-      <span class="badge">{{ message.model }}{% if message.reasoning_effort %} · effort: {{ message.reasoning_effort }}{% endif %}</span>
-      {% if message.total_tokens is not none %}
-      <span class="badge badge-usage" title="prompt {{ message.prompt_tokens }} · completion {{ message.completion_tokens }} · total {{ message.total_tokens }}">↑{{ message.prompt_tokens if message.prompt_tokens is not none else 0 }} ↓{{ message.completion_tokens if message.completion_tokens is not none else 0 }}</span>
-      {% endif %}
-    </div>
-    {% if message.reasoning %}
-    <details class="reasoning" open>
-      <summary>Thinking</summary>
-      <div class="reasoning-text">{{ message.reasoning }}</div>
-    </details>
-    {% endif %}
-    <div class="response-content">{{ message.content }}</div>
-  </div>
-</div>
+</main>
 {% endblock %}

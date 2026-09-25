@@ -236,8 +236,10 @@
     });
     const copyButton = target.closest('.btn-copy');
     if (copyButton) copy(JSON.parse(copyButton.dataset.copy), copyButton);
+    const copyPrompt = target.closest('#copy-prompt-btn');
+    if (copyPrompt) copy($('#prompt-messages').textContent, copyPrompt);
     const copyAll = target.closest('#copy-all-btn');
-    if (copyAll) copy($$('#message-list .message, .prompt-messages .message').map(el => `${$('.role-label', el)?.textContent || ''}\n${$('.content', el)?.textContent || ''}`).join('\n\n'), copyAll);
+    if (copyAll) copy($$('#message-list .message').map(el => `${$('.role-label', el)?.textContent || ''}\n${$('.content', el)?.textContent || ''}`).join('\n\n'), copyAll);
   });
   document.body.addEventListener('htmx:beforeRequest', event => {
     const form = event.detail.elt;

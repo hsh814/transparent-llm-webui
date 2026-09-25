@@ -216,7 +216,8 @@ def show_prompt(request: Request, session_id: int, message_id: int):
         if prompt:
             messages.insert(0, {"role": "system", "content": prompt})
     return templating.templates.TemplateResponse(request, "_prompt_viewer.html", {
-        "session": session, "folder": folder, "message": message, "messages": messages,
-        "sys_note": note, "chunk_note": None, "recorded": job is not None,
+        "session": session, "message": message, "messages": messages,
+        "messages_json": json.dumps(messages, ensure_ascii=False, indent=2),
+        "sys_note": note, "recorded": job is not None,
         "request_params": json.loads(job["params_json"]) if job else None,
     })

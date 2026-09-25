@@ -48,7 +48,7 @@
     $('.menu-btn')?.setAttribute('aria-expanded', String(open));
     if ($('.main')) $('.main').inert = open;
     if (matchMedia('(max-width: 720px)').matches && $('#sidebar')) $('#sidebar').inert = !open;
-    if (open) $('#chat-search')?.focus();
+    if (open) $('.new-conversation')?.focus({preventScroll: true});
     else $('.menu-btn')?.focus({preventScroll: true});
   }
   function scrollBottom() {

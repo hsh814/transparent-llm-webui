@@ -2,6 +2,7 @@
   'use strict';
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
+  const textMeasure = document.createElement('canvas').getContext('2d');
   const folderState = new Map();
   const readyForms = new WeakSet();
   let toastTimer;
@@ -24,6 +25,23 @@
   }
   function draftKey(form) { return `transparent:draft:${form.dataset.sessionId}`; }
   function resize(textarea) {
+    const form = textarea.closest('form.composer');
+    if (form) {
+      const submit = $('button[type="submit"]', form);
+      const inset = submit ? Math.ceil(submit.getBoundingClientRect().width) + 12 : 116;
+      form.style.setProperty('--composer-compact-inset', inset + 'px');
+      form.classList.add('is-compact');
+      textarea.style.height = 'auto';
+      const style = getComputedStyle(textarea);
+      textMeasure.font = style.font;
+      const available = textarea.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+      const compact = !textarea.value.includes('\n') && textMeasure.measureText(textarea.value).width <= available;
+      form.classList.toggle('is-compact', compact);
+      if (compact) {
+        textarea.style.height = '';
+        return;
+      }
+    }
     textarea.style.height = 'auto';
     textarea.style.height = Math.min(textarea.scrollHeight, Math.min(240, innerHeight * .3)) + 'px';
   }
@@ -294,6 +312,8 @@
       if ($('.main')) $('.main').inert = false;
     }
     if ($('#sidebar')) $('#sidebar').inert = mobile && !$('.layout').classList.contains('nav-open');
+    const textarea = $('.composer textarea');
+    if (textarea) resize(textarea);
   });
   document.addEventListener('scroll', event => {
     if (event.target.matches?.('#folder-list, .sidebar')) closeFolderMenus();

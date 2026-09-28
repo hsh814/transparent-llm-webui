@@ -36,7 +36,7 @@
   <form class="composer" data-session-id="{{ session.id }}" data-mode="{{ folder.type }}"
         hx-post="/sessions/{{ session.id }}/{{ 'memo' if folder.type == 'memo' else 'send' }}"
         hx-target="#message-list" hx-swap="beforeend" hx-disabled-elt="find button[type=submit]" hx-sync="this:drop">
-    <textarea name="content" rows="2" aria-label="{{ 'Note' if folder.type == 'memo' else 'Message' }}"
+    <textarea name="content" rows="1" aria-label="{{ 'Note' if folder.type == 'memo' else 'Message' }}"
               placeholder="{{ 'Write something worth keeping…' if folder.type == 'memo' else 'Paste the text you want to translate…' if folder.type == 'translation' else 'Ask anything, think out loud…' }}" required></textarea>
     <div class="composer-actions"><span class="composer-status" role="status"></span>
       <button type="button" class="btn-stop" hx-post="/sessions/{{ session.id }}/stop" hx-target="#message-list" hx-swap="innerHTML" hx-disabled-elt="this" hidden>■ Stop</button>

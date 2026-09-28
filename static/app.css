@@ -125,14 +125,17 @@ input.title-input:hover, input.title-input:focus { border-bottom-color: var(--bo
 .error-text { font-size: 12px; color: var(--danger); }
 .generation-error { border-bottom: 1px solid var(--border); }
 .composer-wrap { position: relative; padding: 12px max(28px, calc((100% - 820px)/2)) 18px; flex-shrink: 0; }
-.composer { background: var(--surface); border: 1px solid #d7ded5; border-radius: 14px; padding: 14px 14px 10px; box-shadow: 0 4px 20px #25332d05; }
+.composer { --composer-control-height: 34px; --composer-compact-inset: 116px; background: var(--surface); border: 1px solid #d7ded5; border-radius: 14px; padding: 14px 14px 10px; box-shadow: 0 4px 20px #25332d05; }
 .composer:focus-within { border-color: #89a48d; box-shadow: 0 0 0 3px #37664f09; }
-.composer textarea { display: block; width: 100%; min-height: 52px; max-height: min(240px, 30vh); padding: 0 3px; border: 0; outline: 0; resize: none; background: transparent; font-size: 14px; line-height: 1.6; }
+.composer textarea { display: block; width: 100%; min-height: 1.6em; max-height: min(240px, 30vh); padding: 0 3px; border: 0; outline: 0; resize: none; background: transparent; font-size: 14px; line-height: 1.6; }
 .composer textarea::placeholder { color: #8c978f; }
 .composer-actions { display: flex; align-items: center; justify-content: flex-end; gap: 9px; padding-top: 8px; }
-.composer .btn { padding: 6px 13px; font-size: 12px; border-radius: 8px; }
+.composer .btn { height: var(--composer-control-height); padding: 6px 13px; font-size: 12px; border-radius: 8px; }
 .composer .btn span { margin-left: 10px; }
 .composer-status { margin-right: auto; font-size: 11px; color: var(--muted); }
+.composer.is-compact:not(:has(.btn-stop:not([hidden]))) { position: relative; padding: 10px 10px 10px 14px; }
+.composer.is-compact:not(:has(.btn-stop:not([hidden]))) textarea { height: var(--composer-control-height) !important; min-height: var(--composer-control-height); max-height: var(--composer-control-height); padding: 4px var(--composer-compact-inset) 4px 3px; overflow: hidden; white-space: nowrap; }
+.composer.is-compact:not(:has(.btn-stop:not([hidden]))) .composer-actions { position: absolute; right: 10px; bottom: 10px; padding-top: 0; }
 .composer-hint { display: flex; justify-content: space-between; gap: 10px; margin-top: 9px; color: #879189; font-size: 10px; }
 .jump-latest { position: absolute; bottom: calc(100% + 2px); left: 50%; transform: translateX(-50%); background: var(--surface); box-shadow: 0 3px 10px #25332d10; }
 .conversation-empty { margin: auto; max-width: 390px; text-align: center; color: var(--muted); }

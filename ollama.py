@@ -12,6 +12,7 @@ import os
 import time
 from functools import wraps
 from typing import Iterator
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -20,6 +21,7 @@ OPENAI_BASE = os.environ.get("OLLAMA_OPENAI_BASE_URL", "https://ollama.com/v1")
 
 TIMEOUT = httpx.Timeout(120.0, connect=20.0)
 METADATA_TIMEOUT = httpx.Timeout(5.0, connect=3.0)
+SEARCH_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 
 _CACHE: dict[tuple, tuple[float, object]] = {}
 
@@ -82,6 +84,31 @@ def model_context_length(model: str) -> int | None:
             ctx = int(value)
             break
     return ctx
+
+
+def web_search(query: str, max_results: int = 5) -> list[dict]:
+    """Fetch validated source snippets once; malformed results fail visibly."""
+    with httpx.Client(base_url=API_BASE, headers=_headers(), timeout=SEARCH_TIMEOUT) as client:
+        resp = client.post("/api/web_search", json={"query": query, "max_results": max_results})
+        resp.raise_for_status()
+        data = resp.json()
+    if not isinstance(data, dict) or data.get("error") or not isinstance(data.get("results"), list):
+        raise ValueError("Invalid search response from Ollama")
+    if len(data["results"]) > max_results:
+        raise ValueError("Ollama returned more search results than requested")
+    results = []
+    for result in data["results"]:
+        if not isinstance(result, dict) or any(
+            not isinstance(result.get(key), str) for key in ("title", "url", "content")
+        ):
+            raise ValueError("Invalid search result from Ollama")
+        url = result["url"]
+        parsed = urlsplit(url)
+        if (parsed.scheme not in ("http", "https") or not parsed.netloc or not parsed.hostname
+                or any(character.isspace() or ord(character) < 32 for character in url)):
+            raise ValueError("Invalid search source URL from Ollama")
+        results.append({key: result[key] for key in ("title", "url", "content")})
+    return results
 
 
 def _build_payload(model: str, messages: list[dict], params: dict) -> dict:

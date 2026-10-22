@@ -15,7 +15,7 @@
             hx-swap="innerHTML"
             hx-confirm="Delete this message?">×</button>
     {% endif %}
-    {% if message.role == 'assistant' %}
+    {% if message.role in ('user', 'assistant') %}
     <a class="btn-mini" target="_blank" rel="noopener"
        href="/sessions/{{ session.id }}/messages/{{ message.id }}/prompt">Prompt</a>
     {% endif %}
@@ -30,4 +30,9 @@
   </details>
   {% endif %}
   <div class="content">{{ message.content }}</div>
+  {% if message.role == 'user' %}
+  {% with attachments=message.attachments_json | default('[]') | from_json %}{% include "_attachments.html" %}{% endwith %}
+  {% elif job | default(None) %}
+  {% with search=job.search_json | default(None) | from_json %}{% include "_search.html" %}{% endwith %}
+  {% endif %}
 </div>

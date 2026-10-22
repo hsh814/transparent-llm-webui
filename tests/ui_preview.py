@@ -15,6 +15,8 @@ _failed_once: set[str] = set()
 
 def preview_stream(model, messages, params):
     source = messages[-1]["content"]
+    if isinstance(source, list):
+        source = "\n".join(part["text"] for part in source if part["type"] == "text")
     if "[fail]" in source and source not in _failed_once:
         _failed_once.add(source)
         time.sleep(0.3)
@@ -35,8 +37,17 @@ def preview_stream(model, messages, params):
     yield {"type": "done", "usage": {"prompt_tokens": 12, "completion_tokens": 28, "total_tokens": 40}}
 
 
+def preview_search(query, max_results=5):
+    time.sleep(0.4)
+    if "[search-fail]" in query:
+        raise RuntimeError("Simulated search failure")
+    return [{"title": "Paper with a table and figure", "url": "https://example.org/paper",
+             "content": "Table 1 reports 42 samples; Figure 1 compares the two methods."}]
+
+
 ollama.list_models = lambda: ["gemma4:31b", "qwen3:32b", "gpt-oss:120b"]
 ollama.model_context_length = lambda model: 32768
 ollama.chat_stream = preview_stream
+ollama.web_search = preview_search
 
 from app import app  # noqa: E402 — the preview overrides are intentionally installed first.

@@ -2,9 +2,10 @@
   'use strict';
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
-  const textMeasure = document.createElement('canvas').getContext('2d');
   const folderState = new Map();
   const readyForms = new WeakSet();
+  // Files are deliberately memory-only; text and per-chat search settings survive reload.
+  const attachmentDrafts = new Map();
   let toastTimer;
   let followLatest = true;
   let observedList;
@@ -24,26 +25,75 @@
     try { return localStorage[method](key, value); } catch (_) { return null; }
   }
   function draftKey(form) { return `transparent:draft:${form.dataset.sessionId}`; }
-  function resize(textarea) {
-    const form = textarea.closest('form.composer');
-    if (form) {
-      const submit = $('button[type="submit"]', form);
-      const inset = submit ? Math.ceil(submit.getBoundingClientRect().width) + 12 : 116;
-      form.style.setProperty('--composer-compact-inset', inset + 'px');
-      form.classList.add('is-compact');
-      textarea.style.height = 'auto';
-      const style = getComputedStyle(textarea);
-      textMeasure.font = style.font;
-      const available = textarea.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
-      const compact = !textarea.value.includes('\n') && textMeasure.measureText(textarea.value).width <= available;
-      form.classList.toggle('is-compact', compact);
-      if (compact) {
-        textarea.style.height = '';
-        return;
+  function searchKey(form) { return `transparent:search:${form.dataset.sessionId}`; }
+  function attachmentState(form) {
+    const id = form.dataset.sessionId;
+    if (!attachmentDrafts.has(id)) attachmentDrafts.set(id, []);
+    return attachmentDrafts.get(id);
+  }
+  function hasContent(form) {
+    return !!$('textarea', form).value.trim() || (form.dataset.mode === 'chat' && attachmentState(form).length > 0);
+  }
+  function syncInputSummary(form) {
+    const summary = $('.input-summary', form);
+    if (!summary) return;
+    const count = attachmentState(form).length;
+    const state = [];
+    if (count) state.push(`${count} ${count === 1 ? 'file' : 'files'}`);
+    if ($('[name="web_search"]', form).checked) state.push('Search on');
+    summary.textContent = state.length ? `· ${state.join(' · ')}` : '';
+    summary.hidden = state.length === 0;
+  }
+  function renderAttachments(form) {
+    const list = $('.attachment-drafts', form);
+    if (!list) return;
+    const entries = attachmentState(form);
+    list.replaceChildren();
+    list.hidden = entries.length === 0;
+    $('.file-draft-note', form).hidden = entries.length === 0;
+    syncInputSummary(form);
+    entries.forEach((entry, index) => {
+      const item = document.createElement('li');
+      if (entry.url) {
+        const image = document.createElement('img');
+        image.src = entry.url;
+        image.alt = `Preview of ${entry.file.name}`;
+        item.append(image);
       }
-    }
+      const name = document.createElement('span');
+      name.textContent = `${entry.file.name} · ${(entry.file.size / 1048576).toFixed(2)} MiB`;
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'btn-mini remove-attachment';
+      remove.dataset.attachmentIndex = String(index);
+      remove.textContent = 'Remove';
+      remove.setAttribute('aria-label', `Remove ${entry.file.name}`);
+      item.append(name, remove);
+      list.append(item);
+    });
+  }
+  function syncSearch(form) {
+    const checkbox = $('[name="web_search"]', form);
+    if (!checkbox) return;
+    const query = $('[name="search_query"]', form);
+    query.disabled = !checkbox.checked;
+    query.closest('label').hidden = !checkbox.checked;
+    syncInputSummary(form);
+  }
+  function saveSearch(form) {
+    const checkbox = $('[name="web_search"]', form);
+    if (!checkbox) return;
+    storage('setItem', searchKey(form), JSON.stringify({
+      enabled: checkbox.checked, query: $('[name="search_query"]', form).value,
+    }));
+    syncSearch(form);
+  }
+  function resize(textarea) {
     textarea.style.height = 'auto';
-    textarea.style.height = Math.min(textarea.scrollHeight, Math.min(240, innerHeight * .3)) + 'px';
+    if (!textarea.value) return;
+    const style = getComputedStyle(textarea);
+    const borders = parseFloat(style.borderTopWidth) + parseFloat(style.borderBottomWidth);
+    textarea.style.height = Math.min(textarea.scrollHeight + borders, Math.min(240, innerHeight * .3)) + 'px';
   }
   function closeFolderMenus() {
     $$('.folder-menu.open').forEach(menu => {
@@ -132,6 +182,15 @@
       const textarea = $('textarea', form);
       textarea.value = storage('getItem', draftKey(form)) || '';
       resize(textarea);
+      if (form.dataset.mode === 'chat') {
+        let saved = {};
+        try { saved = JSON.parse(storage('getItem', searchKey(form)) || '{}') || {}; } catch (_) { /* Ignore invalid saved settings. */ }
+        $('[name="web_search"]', form).checked = saved.enabled === true;
+        $('[name="search_query"]', form).value = typeof saved.query === 'string' ? saved.query : '';
+        $('.attachment-input', form).value = '';
+        syncSearch(form);
+        renderAttachments(form);
+      }
     }
     const list = $('#message-list');
     if (list && list !== observedList) {
@@ -204,6 +263,21 @@
       resize(event.target);
     }
     if (event.target.id === 'chat-search') filterChats();
+    if (event.target.matches('.composer [name="search_query"]')) saveSearch(event.target.closest('form'));
+  });
+  document.addEventListener('change', event => {
+    const form = event.target.closest('form.composer');
+    if (!form) return;
+    if (event.target.matches('[name="web_search"]')) saveSearch(form);
+    if (event.target.matches('.attachment-input')) {
+      const entries = attachmentState(form);
+      for (const file of event.target.files) {
+        const preview = ['image/png', 'image/jpeg', 'image/webp'].includes(file.type);
+        entries.push({file, url: preview ? URL.createObjectURL(file) : null});
+      }
+      event.target.value = '';
+      renderAttachments(form);
+    }
   });
   document.addEventListener('keydown', event => {
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
@@ -221,7 +295,7 @@
       if (form.dataset.mode !== 'chat' && !event.metaKey && !event.ctrlKey) return;
       if (matchMedia('(pointer: coarse)').matches && !event.metaKey && !event.ctrlKey) return;
       event.preventDefault();
-      if (!$('button[type="submit"]', form).disabled && event.target.value.trim()) form.requestSubmit();
+      if (!$('button[type="submit"]', form).disabled && hasContent(form)) form.requestSubmit();
     }
   });
   document.addEventListener('click', event => {
@@ -230,6 +304,19 @@
     if (target.closest('.menu-btn')) drawer(!$('.layout').classList.contains('nav-open'));
     if (target.closest('.scrim')) drawer(false);
     if (target.closest('.jump-latest')) { followLatest = true; scrollBottom(); syncMessages(); }
+    const inputToggle = target.closest('.input-tools-toggle');
+    if (inputToggle) {
+      const panel = $('.composer-extras', inputToggle.closest('form'));
+      panel.hidden = !panel.hidden;
+      inputToggle.setAttribute('aria-expanded', String(!panel.hidden));
+    }
+    const removeAttachment = target.closest('.remove-attachment');
+    if (removeAttachment) {
+      const form = removeAttachment.closest('form');
+      const [removed] = attachmentState(form).splice(Number(removeAttachment.dataset.attachmentIndex), 1);
+      if (removed?.url) URL.revokeObjectURL(removed.url);
+      renderAttachments(form);
+    }
     const toggle = target.closest('.folder-toggle');
     if (toggle) {
       const folder = toggle.closest('.folder-item');
@@ -259,12 +346,23 @@
     const copyAll = target.closest('#copy-all-btn');
     if (copyAll) copy($$('#message-list .message').map(el => `${$('.role-label', el)?.textContent || ''}\n${$('.content', el)?.textContent || ''}`).join('\n\n'), copyAll);
   });
+  document.body.addEventListener('htmx:configRequest', event => {
+    const form = event.detail.elt;
+    if (!form.matches('form.composer') || form.dataset.mode !== 'chat') return;
+    const entries = attachmentState(form);
+    // An empty native file input becomes files='' in FormData; omit it entirely.
+    delete event.detail.parameters.files;
+    if (entries.length) event.detail.parameters.files = entries.map(entry => entry.file);
+    event.detail.parameters.web_search = $('[name="web_search"]', form).checked ? 'true' : 'false';
+    if (!$('[name="web_search"]', form).checked) delete event.detail.parameters.search_query;
+    form._submittedFiles = [...entries];
+  });
   document.body.addEventListener('htmx:beforeRequest', event => {
     const form = event.detail.elt;
     const title = $('.title-input', form);
     if (title) form._submittedTitle = title.value;
     if (form.matches('form.composer')) {
-      if ($('.streaming') || !$('textarea', form).value.trim()) { event.preventDefault(); return; }
+      if ($('.streaming') || !hasContent(form)) { event.preventDefault(); return; }
       form._submittedDraft = $('textarea', form).value;
       followLatest = true;
     }
@@ -277,11 +375,23 @@
       title.value = savedTitle.textContent;
     }
     if (event.detail.successful && form.matches('form.composer')) {
-      const textarea = $('textarea', form);
-      if (textarea.value === form._submittedDraft) {
-        textarea.value = ''; storage('removeItem', draftKey(form)); resize(textarea);
+      const currentForm = $$('form.composer').find(element => element.dataset.sessionId === form.dataset.sessionId);
+      const textarea = currentForm ? $('textarea', currentForm) : null;
+      if (storage('getItem', draftKey(form)) === form._submittedDraft) storage('removeItem', draftKey(form));
+      if (textarea && textarea.value === form._submittedDraft) {
+        textarea.value = ''; resize(textarea);
       }
-      textarea.focus({preventScroll: true});
+      if (form.dataset.mode === 'chat') {
+        const submitted = new Set(form._submittedFiles || []);
+        const retained = attachmentState(form).filter(entry => {
+          if (!submitted.has(entry)) return true;
+          if (entry.url) URL.revokeObjectURL(entry.url);
+          return false;
+        });
+        attachmentDrafts.set(form.dataset.sessionId, retained);
+        if (currentForm) renderAttachments(currentForm);
+      }
+      if (form.isConnected) textarea?.focus({preventScroll: true});
     }
     syncMessages();
   });

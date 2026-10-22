@@ -4,18 +4,44 @@
 <main class="prompt-viewer">
   <a href="/sessions/{{ session.id }}">Back to chat</a>
   <h1>Prompt</h1>
-  <p>{{ 'Exact messages saved when this request was submitted, in the order sent to the Ollama API.' if recorded else 'Reconstructed messages — the exact original request is unavailable.' }}</p>
+  {% set active_job = job | default(None) %}
+  {% set saved_search = search | default(None) %}
+  {% if active_job %}
+  <p>Job status: <strong>{{ active_job.status }}</strong></p>
+  {% if active_job.error and (not saved_search or active_job.error != saved_search.error) %}<p class="error-text">{{ active_job.error }}</p>{% endif %}
+  {% endif %}
+  {% if saved_search and saved_search.status != 'completed' %}
+  <p class="preparation-notice">Prepared request only: web search has not completed. These messages are not finalized and have not been sent to the model. A retry may complete search and enrich the saved request.</p>
+  {% elif active_job and active_job.status == 'queued' %}
+  <p class="preparation-notice">Saved request is queued for this attempt. This view does not confirm delivery to the model.</p>
+  {% else %}
+  <p>{{ 'Exact saved API messages, in request order. Saved messages alone do not prove that the model received or completed the request.' if recorded else 'Reconstructed messages — the exact original request is unavailable.' }}</p>
+  {% endif %}
   {% if sys_note %}<p>{{ sys_note }}</p>{% endif %}
-  <p>Model: <code>{{ message.model }}</code></p>
-  <p>Message roles are shown as headings. The text below each heading is the message content, with its original line breaks and indentation.</p>
+  <p>Model: <code>{{ active_job.model if active_job else message.model }}</code></p>
+  {% with attachments=attachments | default([]) %}{% include "_attachments.html" %}{% endwith %}
+  {% with search=saved_search, search_expanded=True %}{% include "_search.html" %}{% endwith %}
+  <p>Text and image parts are shown below in order. Images require a vision-capable model; PDF pages include both rendered images and extracted text. Model accuracy is not guaranteed. Full image base64 is available in the exact JSON details.</p>
   {% for m in messages %}
   <section class="prompt-message">
     <h2>{{ m.role }}</h2>
-    <pre><span>{{ m.content }}</span></pre>
+    {% if m.content is string %}
+    <pre>{{ m.content }}</pre>
+    {% else %}
+    {% for part in m.content %}
+    {% if part.type == 'text' %}
+    <pre>{{ part.text }}</pre>
+    {% elif part.type == 'image_url' %}
+    <figure class="prompt-image"><img class="attachment-image" src="{{ part.image_url.url | image_url }}" alt="Request image part {{ loop.index }}" loading="lazy"><figcaption>Image part {{ loop.index }} · complete data URL in JSON below</figcaption></figure>
+    {% else %}
+    <p>Additional content part of type <code>{{ part.type }}</code>; inspect the exact JSON below.</p>
+    {% endif %}
+    {% endfor %}
+    {% endif %}
   </section>
   {% endfor %}
-  <details>
-    <summary>Show JSON</summary>
+  <details class="exact-request">
+    <summary>Exact messages JSON (includes full image base64)</summary>
     <button class="btn-mini" type="button" id="copy-prompt-btn">Copy messages JSON</button>
     <pre id="prompt-messages">{{ messages_json }}</pre>
   </details>

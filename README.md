@@ -1,6 +1,6 @@
 # Transparent Chat
 
-A single-user workspace for conversations, translation, and notes. FastAPI, htmx, and SQLite; no frontend build step or JavaScript framework. Model requests go to Ollama Cloud.
+A single-user workspace for conversations, translation, and notes, with image/PDF attachments and opt-in web search. FastAPI, htmx, and SQLite; no frontend build step or JavaScript framework. Model requests go to Ollama Cloud.
 
 ## Setup and run
 
@@ -30,11 +30,36 @@ Open `http://localhost:8000`. An API key is required at startup. Run **one appli
 - The current model stays in the header. Open **Settings** to adjust reasoning effort, temperature, top P, maximum output tokens, or the random seed; click **Apply** to save.
 - A configured system prompt is shown above the conversation. It is sent verbatim. Empty prompts add no system message.
 - On a desktop, Enter sends a chat message and Shift + Enter inserts a newline. Notes and translations use Enter for newlines and `⌘/Ctrl Enter` to submit. On touch devices, Enter inserts a newline.
-- Drafts are stored per chat in browser local storage and cleared only after a successful submission. They survive navigation and reloads, including failed sends.
+- Text drafts are stored per chat in browser local storage and cleared only after a successful submission. They survive navigation and reloads, including failed sends. Unsubmitted attachments stay in browser memory across chat navigation and failed sends, but are lost on reload; remove them individually before sending if needed.
 - **Stop** stops accepting response output and cancels queued translation chunks. Partial output remains visible. **Retry with original settings** retries the latest unfinished submission using its stored request. A stopped upstream connection closes when the worker next receives data or times out.
-- Reading earlier messages does not force-scroll to the bottom. **Latest message** returns to the newest output. The composer stays visible on mobile.
-- Each assistant message has **Copy** and **Prompt** actions. Prompt opens a scrollable plain-text view of the saved API messages, preserving line breaks and indentation, with role headings. **Show JSON** optionally reveals the ordered messages array and **Copy messages JSON** copies it without headings or the response. The model and expandable saved generation settings are shown separately. **Copy chat** copies the displayed conversation.
+- Reading earlier messages does not force-scroll to the bottom. **Latest message** returns to the newest output. The empty text box is one line tall and grows with its content. Its action toolbar sits outside, directly below the text box, and stays visible on mobile.
+- **Prompt** is available on new user messages, unfinished responses, and assistant messages. It shows saved API messages in order, preserving text whitespace and previewing image parts. **Exact messages JSON** reveals the complete messages array, including image base64; **Copy messages JSON** copies it without headings or the response. Model, saved settings, attachments, and search provenance are shown separately. Queued or search-incomplete requests are explicitly labeled; a saved request is not proof of upstream delivery. **Copy chat** copies displayed message text, not attachment bytes or provenance.
 - Links to `/?session=<id>` open a complete page and survive reloads and browser navigation.
+
+### Images, PDFs, and web search
+
+These controls are available in **Chat** folders; Memo and Translation remain text-only. **More inputs** and **Send** share a toolbar outside the text box. Open **More inputs** to reveal attachment and web-search controls between the text box and toolbar. The panel starts collapsed whenever a chat is opened. When collapsed, the toggle still shows the number of attached files and **Search on** if enabled; collapsing the panel does not remove files or turn search off. Detailed limits and processing behavior are documented below rather than in a composer help disclosure.
+
+- **Attach images or PDF** accepts PNG, JPEG, static WebP, and PDF. A message may contain files without accompanying text. The selected model must support vision; the app never silently substitutes text-only input.
+- Images are validated locally and sent as their original bytes in base64 image content parts.
+- PDFs are processed locally with PDFium. **Every page is sent as a rendered image plus extracted text**, in page order. This preserves visual access to tables, figures, equations, and multi-column layouts rather than relying on text extraction alone. Scanned/textless pages are included as images; there is no local OCR. Renderings use JPEG quality 90 at up to 144 DPI, capped at 2,000 pixels on the long edge. These are page renditions, not the original PDF file.
+- Expand a saved attachment to inspect its name, original byte size, SHA-256, page images, and extracted text. App-added labels and document-handling instructions are visible in Prompt alongside the exact image content. PDF extraction can lose reading order; vision models can still misread small labels, equations, or complex tables. Verify important values against the original paper; attach a close-up image when needed.
+- **Web search** is off in a new chat. Enabling it sends your message, or the optional explicit query override, to [Ollama's `/api/web_search`](https://docs.ollama.com/capabilities/web-search), using the existing API key. Files and extracted PDF text are not automatically used as the search query. The choice and query are remembered per chat. Each submission makes one search for up to five results; this is not an autonomous browsing loop and does not fetch full source pages.
+- Search status, query, result limit, retrieval time, source URLs, and snippets are saved and inspectable. Status and sources update while the response streams. Snippets are labeled as untrusted reference material and added to the final user content; the folder's system prompt is unchanged. Only HTTP(S) source links are clickable. No results is shown explicitly; a search error stops generation instead of silently answering without the requested search.
+- Retrying after search completed reuses the saved results and exact model input. If search failed or was interrupted before results were saved, retry runs the same saved query again. Later Chat turns retain earlier attachments and search context in history; disabling search prevents a new search, not inclusion of prior context.
+
+| Per-submission limit | Value |
+|---|---|
+| Files | 4 |
+| Original file size | 10 MiB each, 20 MiB combined |
+| Image dimensions | 20 million pixels per image |
+| PDF pages | 20 combined across all PDFs |
+| Extracted PDF text | 100,000 characters combined |
+| Rendered PDF image bytes | 32 MiB combined |
+
+Invalid, unreadable, password-required, or over-limit attachments reject the entire submission before any search or model request. Pages/text are never silently truncated; split longer documents yourself. The selected model's context/image limits may be lower and can still cause an upstream rejection.
+
+**Privacy and storage:** only the query is sent to search; the conversation, original images, PDF page renditions, extracted text, and search snippets are sent to the configured model service. SQLite stores these inputs and immutable request history, so image-heavy chats can grow substantially. Original PDF files are not retained; keep them separately. Local storage and the database are not encrypted by this application.
 
 ### Folder modes
 
@@ -46,13 +71,13 @@ Open `http://localhost:8000`. An API key is required at startup. Run **one appli
 
 ## Reliable generation and prompt history
 
-The send transaction saves user messages and an immutable generation snapshot: model, supported generation parameters, system prompt, and exact ordered API messages. Editing settings or folder types afterward cannot change a submitted request or its Prompt page.
+The send transaction saves user messages and a generation snapshot: model, supported generation parameters, system prompt, attachments, exact ordered API messages, and optional search intent. For search-enabled turns, the worker saves results and final enriched messages atomically **before** contacting the model; until then Prompt labels the request as prepared rather than finalized. Once prepared, model input is immutable. Editing settings or folder types afterward cannot change the stored request.
 
 A background worker generates each response once. Generation state, partial output, reasoning, and errors are stored in SQLite. SSE connections display this state; they never initiate duplicate model calls. There is at most one live SSE connection per conversation view, including translation batches. Escaped HTML and multiline SSE framing preserve line breaks, indentation, and literal HTML in model output.
 
 On reconnection, output is replaced with the stored content so it cannot be appended twice. Completed output is persisted as an assistant message together with token usage. Restarted work is marked interrupted and can be explicitly retried. A retry keeps the original request and increments an attempt counter so a late result from the old worker cannot overwrite it.
 
-Older messages remain available. Their Prompt pages are labeled as best-effort reconstructions because the previous schema did not store complete request snapshots. Existing tables and messages are preserved; the generation table and indexes are added automatically at startup.
+Older messages remain available. Their Prompt pages are labeled as best-effort reconstructions when complete request snapshots were not stored. Existing tables and messages are preserved; generation storage, attachment/API-content columns, search-state columns, and indexes are added automatically at startup.
 
 ### Supported model settings
 
@@ -65,7 +90,7 @@ Context capacity is informational when it can be retrieved. Reasoning-level supp
 | Variable | Default | Purpose |
 |---|---|---|
 | `OLLAMA_API_KEY` | Required | Ollama Cloud bearer token |
-| `OLLAMA_API_BASE_URL` | `https://ollama.com` | Native model metadata API |
+| `OLLAMA_API_BASE_URL` | `https://ollama.com` | Native model metadata and web-search API |
 | `OLLAMA_OPENAI_BASE_URL` | `https://ollama.com/v1` | Model list and chat completions |
 | `CHAT_DB_PATH` | `chat.db` beside `db.py` | Database path; useful for isolated development |
 
@@ -78,7 +103,7 @@ uv run python -m unittest discover -s tests -v
 node --check static/app.js
 ```
 
-Tests use a temporary database and mocked Ollama responses; they do not send prompts to a live service or modify your chat database. They cover generation concurrency, request snapshots, SSE escaping and whitespace, translation pairing, failure/retry/stop behavior, settings validation, deletion, memo isolation, direct links, and upstream stream parsing.
+Tests use a temporary database and mocked Ollama responses; they do not send prompts to a live service or modify your chat database. They cover generation concurrency, request snapshots, SSE escaping and whitespace, translation pairing, failure/retry/stop behavior, settings validation, deletion, memo isolation, direct links, upstream stream parsing, original image fidelity, PDF page rendering/text extraction, atomic attachment rejection, search opt-in/failure/reuse, and live search-state transitions.
 
 ### Browser checks
 
@@ -97,8 +122,9 @@ The interactive coverage inventory and results are in [tests/UI_QA.md](tests/UI_
 ```text
 app.py           App setup, startup recovery, full-page navigation
 db.py            SQLite storage and atomic generation state transitions
-generation.py    Background generation workers and safe error messages
-ollama.py        API payloads, response parsing, metadata cache
+generation.py    Background generation workers, durable search preparation, safe errors
+ollama.py        API payloads, web search, response parsing, metadata cache
+inputs.py        Validated images, PDF page rendering/text extraction, content parts
 templating.py    Shared template helpers and ordered conversation rendering
 routers/         Folder, session, chat, stop/retry, and prompt-viewer routes
 templates/       Jinja HTML and htmx/SSE fragments

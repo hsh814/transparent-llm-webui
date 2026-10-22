@@ -1,0 +1,25 @@
+{% if attachments %}
+<section class="saved-attachments" aria-label="Saved attachments">
+  {% for attachment in attachments %}
+  <details class="saved-attachment">
+    <summary>
+      {% if attachment.data_url %}<img class="attachment-thumb" src="{{ attachment.data_url | image_url }}" alt="Preview of {{ attachment.name }}" loading="lazy">{% endif %}
+      <span>{{ attachment.name }} <span class="muted">{{ attachment.size }} bytes{% if attachment.page_count %} · {{ attachment.page_count }} pages{% endif %}</span></span>
+    </summary>
+    <dl class="attachment-metadata"><dt>Media type</dt><dd>{{ attachment.media_type }}</dd><dt>SHA-256</dt><dd><code>{{ attachment.sha256 }}</code></dd></dl>
+    {% if attachment.pages %}
+    <p class="muted">Every page is sent as a JPEG rendition (quality 90, up to 144 DPI and 2,000 pixels on the long edge) plus extracted text. The original PDF is not sent or retained. Extracted text can lose layout; inspect the page images for tables and figures. No local OCR or accuracy guarantee.</p>
+    {% for page in attachment.pages %}
+    <details class="pdf-page"><summary>Page {{ page.number }} · {{ page.width }} × {{ page.height }} pixels</summary>
+      <img class="attachment-image" src="{{ page.data_url | image_url }}" alt="{{ attachment.name }}, page {{ page.number }}" loading="lazy">
+      <details><summary>Extracted text · page {{ page.number }}</summary><pre class="extracted-text">{{ page.text or 'No text extracted. The page image is still sent to the vision model.' }}</pre></details>
+    </details>
+    {% endfor %}
+    {% elif attachment.data_url %}
+    <p class="muted">{{ attachment.width }} × {{ attachment.height }} pixels · Original image bytes sent to the vision model.</p>
+    <img class="attachment-image" src="{{ attachment.data_url | image_url }}" alt="{{ attachment.name }}" loading="lazy">
+    {% endif %}
+  </details>
+  {% endfor %}
+</section>
+{% endif %}

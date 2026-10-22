@@ -1,5 +1,8 @@
 """Offline regressions. Run: uv run python -m unittest discover -s tests -v."""
 
+import asyncio
+import base64
+import hashlib
 import json
 import os
 import sqlite3
@@ -10,21 +13,61 @@ from tempfile import TemporaryDirectory
 import unittest
 from html import unescape
 from html.parser import HTMLParser
-from unittest.mock import patch
+from io import BytesIO
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 os.environ.setdefault("OLLAMA_API_KEY", "test-key")
 
 import httpx
 from fastapi.testclient import TestClient
+from PIL import Image
 
 import db
 import generation
+import inputs
 import ollama
 import templating
 from app import app
-from routers.chat import _split_translation, _sse
+from routers.chat import _split_translation, _sse, stream_message
 
 START_WORKER = generation.start
+
+
+def paper_pdf(page_count=2):
+    """Real PDF: selectable table text plus a vector figure, then image-only pages."""
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        ("<< /Type /Pages /Kids [" + " ".join(f"{4 + i * 2} 0 R" for i in range(page_count)) +
+         f"] /Count {page_count} >>").encode(),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ]
+    for i in range(page_count):
+        stream = b"1 0 0 rg 20 20 100 60 re f\n"
+        if i == 0:
+            stream += b"BT /F1 14 Tf 20 250 Td (Table 1: Method A = 42) Tj ET\n"
+        objects.extend([
+            (f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 240 300] "
+             f"/Resources << /Font << /F1 3 0 R >> >> /Contents {5 + i * 2} 0 R >>").encode(),
+            f"<< /Length {len(stream)} >>\nstream\n".encode() + stream + b"endstream",
+        ])
+    result = bytearray(b"%PDF-1.4\n")
+    offsets = [0]
+    for number, obj in enumerate(objects, 1):
+        offsets.append(len(result))
+        result.extend(f"{number} 0 obj\n".encode() + obj + b"\nendobj\n")
+    start = len(result)
+    result.extend(f"xref\n0 {len(offsets)}\n0000000000 65535 f \n".encode())
+    for offset in offsets[1:]:
+        result.extend(f"{offset:010} 00000 n \n".encode())
+    result.extend(f"trailer\n<< /Size {len(offsets)} /Root 1 0 R >>\nstartxref\n{start}\n%%EOF\n".encode())
+    return bytes(result)
+
+
+def image_png():
+    with BytesIO() as output, Image.new("RGB", (32, 16), (10, 90, 180)) as image:
+        image.save(output, format="PNG")
+        return output.getvalue()
 
 
 class ElementIds(HTMLParser):
@@ -66,6 +109,189 @@ class AppTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         text = response.text.split('<pre id="prompt-messages">', 1)[1].split("</pre>", 1)[0]
         return json.loads(unescape(text))
+
+    def test_live_search_state_updates_before_model_output(self):
+        self.client.post(f"/sessions/{self.sid}/send", data={"content": "Find a paper", "web_search": "true"})
+        job = db.claim_generation(self.sid)
+        search = json.loads(job["search_json"])
+
+        async def observe_transition():
+            request = SimpleNamespace(is_disconnected=AsyncMock(return_value=False))
+            response = stream_message(request, self.sid, job["user_message_id"])
+            events = response.body_iterator
+            try:
+                pending = await anext(events)
+                self.assertTrue(pending.startswith("event: search\n"))
+                self.assertIn("<strong>pending</strong>", pending)
+                search.update(status="completed", results=[
+                    {"title": "A source", "url": "https://example.org", "content": "A result"},
+                ])
+                db.save_search_preparation(job, search, json.loads(job["messages_json"]))
+                db.update_generation(job, "Answer is arriving", "")
+                completed = await anext(events)
+                self.assertTrue(completed.startswith("event: search\n"))
+                self.assertIn("<strong>completed</strong>", completed)
+                self.assertIn("https://example.org", completed)
+                self.assertNotIn("not finalized or sent", completed)
+                self.assertIn("Answer is arriving", await anext(events))
+            finally:
+                await events.aclose()
+
+        asyncio.run(observe_transition())
+
+    def test_image_only_input_survives_followup_and_prompt_inspection(self):
+        original = image_png()
+        response = self.client.post(f"/sessions/{self.sid}/send",
+                                    files=[("files", ("diagram.png", original, "image/png"))])
+        self.assertEqual(response.status_code, 200, response.text)
+        job = db.list_generations(self.sid)[0]
+        parts = json.loads(job["messages_json"])[-1]["content"]
+        image_part = next(part for part in parts if part["type"] == "image_url")
+        self.assertEqual(base64.b64decode(image_part["image_url"]["url"].split(",", 1)[1]), original)
+        saved = json.loads(db.last_message(self.sid)["attachments_json"])[0]
+        self.assertEqual(saved["sha256"], hashlib.sha256(original).hexdigest())
+        prompt = self.client.get(f'/sessions/{self.sid}/messages/{job["user_message_id"]}/prompt')
+        self.assertEqual(self.prompt_messages(prompt)[-1]["content"], parts)
+        self.finish()
+        self.send("Explain the earlier diagram")
+        followup = db.list_generations(self.sid)[-1]
+        self.assertEqual(json.loads(followup["messages_json"])[1]["content"], parts)
+
+    def test_pdf_preserves_page_images_tables_and_pages_without_text(self):
+        response = self.client.post(f"/sessions/{self.sid}/send", data={"content": "Read the paper"},
+                                    files=[("files", ("paper.pdf", paper_pdf(), "application/pdf"))])
+        self.assertEqual(response.status_code, 200, response.text)
+        attachment = json.loads(db.last_message(self.sid)["attachments_json"])[0]
+        self.assertEqual([p["number"] for p in attachment["pages"]], [1, 2])
+        self.assertIn("Method A = 42", attachment["pages"][0]["text"])
+        self.assertEqual(attachment["pages"][1]["text"], "")
+        for page in attachment["pages"]:
+            with Image.open(BytesIO(base64.b64decode(page["data_url"].split(",", 1)[1]))) as image:
+                # Both pages' figures survived rasterization, including the textless page.
+                self.assertEqual(image.size, (480, 600))
+                red, green, blue = image.getpixel((100, 500))
+                self.assertGreater(red, 240)
+                self.assertLess(green, 15)
+                self.assertLess(blue, 15)
+        parts = json.loads(db.list_generations(self.sid)[0]["messages_json"])[-1]["content"]
+        sent_images = [p["image_url"]["url"] for p in parts if p["type"] == "image_url"]
+        self.assertEqual(sent_images, [p["data_url"] for p in attachment["pages"]])
+        job = self.finish()
+        prompt = self.client.get(f'/sessions/{self.sid}/messages/{job["assistant_message_id"]}/prompt')
+        self.assertEqual(self.prompt_messages(prompt)[-1]["content"], parts)
+
+    def test_attachment_rejection_is_atomic_and_never_truncates_pdfs(self):
+        for files in (
+            [("files", ("fake.png", b"not an image", "image/png"))],
+            [("files", ("broken.pdf", b"%PDF-broken", "application/pdf"))],
+            [("files", ("empty.png", b"", "image/png"))],
+            [("files", ("many.pdf", paper_pdf(21), "application/pdf"))],
+            [("files", ("a.png", image_png(), "image/png"))] * 5,
+        ):
+            with self.subTest(names=[f[1][0] for f in files]):
+                response = self.client.post(f"/sessions/{self.sid}/send", data={"content": "Read"}, files=files)
+                self.assertEqual(response.status_code, 400, response.text)
+                self.assertEqual(db.list_messages(self.sid), [])
+                self.assertEqual(db.list_generations(self.sid), [])
+        with patch.object(inputs, "MAX_TOTAL_BYTES", len(image_png())):
+            response = self.client.post(f"/sessions/{self.sid}/send",
+                                        files=[("files", ("a.png", image_png(), "image/png"))] * 2)
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(db.list_messages(self.sid), [])
+        self.start.assert_not_called()
+
+    def test_search_failure_is_inspectable_without_model_fallback(self):
+        self.client.post(f"/sessions/{self.sid}/send", data={"content": "Latest paper", "web_search": "true"})
+        with patch.object(ollama, "web_search", side_effect=httpx.ConnectError("secret detail")), \
+                patch.object(ollama, "chat_stream") as model:
+            generation._generate(db.claim_generation(self.sid))
+            model.assert_not_called()
+        job = db.list_generations(self.sid)[0]
+        self.assertEqual(job["status"], "failed")
+        search = json.loads(job["search_json"])
+        self.assertEqual(search["query"], "Latest paper")
+        self.assertEqual(search["status"], "failed")
+        prompt = self.client.get(f'/sessions/{self.sid}/messages/{job["user_message_id"]}/prompt')
+        self.assertEqual(prompt.status_code, 200)
+        self.assertNotIn("secret detail", prompt.text)
+        self.assertEqual(self.prompt_messages(prompt)[-1]["content"], "Latest paper")
+        self.assertTrue(db.retry_generations(self.sid))
+        with patch.object(ollama, "web_search", return_value=[]), \
+                patch.object(ollama, "chat_stream", return_value=(chunk for chunk in [
+                    {"type": "content", "text": "No sources found"}, {"type": "done"},
+                ])):
+            generation._generate(db.claim_generation(self.sid))
+        completed = db.list_generations(self.sid)[0]
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(json.loads(completed["search_json"])["results"], [])
+
+    def test_search_requires_opt_in_and_chat_mode(self):
+        self.client.post(f"/sessions/{self.sid}/send", data={"content": "No search", "search_query": "unused"})
+        with patch.object(ollama, "web_search", side_effect=AssertionError("No opt-in")), \
+                patch.object(ollama, "chat_stream", return_value=(chunk for chunk in [
+                    {"type": "content", "text": "Without search"}, {"type": "done"},
+                ])):
+            generation._generate(db.claim_generation(self.sid))
+        self.assertEqual(db.list_generations(self.sid)[0]["status"], "completed")
+        for mode in ("translation", "memo"):
+            folder = db.create_folder("Other mode", "", mode)
+            sid = db.create_session(folder["id"])["id"]
+            for options in ({"data": {"content": "Text", "web_search": "true"}},
+                            {"files": [("files", ("a.png", image_png(), "image/png"))]}):
+                response = self.client.post(f"/sessions/{sid}/send", **options)
+                self.assertIn(response.status_code, (400, 403))
+                self.assertEqual(db.list_messages(sid), [])
+
+    def test_search_results_and_multimodal_request_are_reused_on_retry(self):
+        self.client.post(f"/sessions/{self.sid}/send",
+                         data={"content": "Compare this", "web_search": "true", "search_query": "paper results"},
+                         files=[("files", ("figure.png", image_png(), "image/png"))])
+        results = [{"title": "Source", "url": "https://example.org/paper", "content": "Reported value: 42"}]
+        with patch.object(ollama, "web_search", return_value=results), \
+                patch.object(ollama, "chat_stream", side_effect=httpx.ConnectError("offline")):
+            generation._generate(db.claim_generation(self.sid))
+        failed = db.list_generations(self.sid)[0]
+        search = json.loads(failed["search_json"])
+        self.assertEqual(search["status"], "completed")
+        self.assertEqual(search["results"], results)
+        db.update_folder(self.folder["id"], "Changed", "Do something else.")
+        self.assertTrue(db.retry_generations(self.sid))
+        with patch.object(ollama, "web_search", side_effect=AssertionError("Do not repeat saved search")), \
+                patch.object(ollama, "chat_stream", return_value=(chunk for chunk in [
+                    {"type": "content", "text": "42 from the cited paper"}, {"type": "done"},
+                ])):
+            generation._generate(db.claim_generation(self.sid))
+        retried = db.list_generations(self.sid)[0]
+        self.assertEqual(retried["status"], "completed")
+        self.assertEqual(retried["messages_json"], failed["messages_json"])
+        self.assertEqual(retried["search_json"], failed["search_json"])
+        parts = json.loads(retried["messages_json"])[-1]["content"]
+        reference = "\n".join(p["text"] for p in parts if p["type"] == "text")
+        self.assertIn("https://example.org/paper", reference)
+        self.assertIn("Reported value: 42", reference)
+        self.send("Follow up without a fresh search")
+        followup = db.list_generations(self.sid)[-1]
+        self.assertIsNone(followup["search_json"])
+        self.assertEqual(json.loads(followup["messages_json"])[1]["content"], parts)
+
+    def test_cancelled_search_cannot_replace_retry_or_contact_model(self):
+        self.client.post(f"/sessions/{self.sid}/send", data={"content": "Find paper", "web_search": "true"})
+        stale = db.claim_generation(self.sid)
+
+        def late_search(*args, **kwargs):
+            db.interrupt_generations(self.sid, "Stopped", "cancelled")
+            db.retry_generations(self.sid)
+            return [{"title": "Stale", "url": "https://example.org/old", "content": "Old result"}]
+
+        with patch.object(ollama, "web_search", side_effect=late_search), \
+                patch.object(ollama, "chat_stream") as model:
+            generation._generate(stale)
+            model.assert_not_called()
+        current = db.list_generations(self.sid)[0]
+        self.assertEqual(current["attempt"], stale["attempt"] + 1)
+        self.assertEqual(current["status"], "queued")
+        self.assertEqual(current["messages_json"], stale["messages_json"])
+        self.assertEqual(json.loads(current["search_json"])["status"], "pending")
 
     def test_prompt_json_matches_outgoing_messages_after_settings_change(self):
         for mode in ("chat", "translation"):
@@ -409,6 +635,18 @@ class AppTests(unittest.TestCase):
 
 
 class OllamaTests(unittest.TestCase):
+    def test_malformed_or_unsafe_search_results_are_rejected(self):
+        real_client = httpx.Client
+        for data in ({}, {"results": [{"title": "Bad", "url": "javascript:alert(1)", "content": "x"}]},
+                     {"results": [{"title": "Incomplete", "url": "https://example.org"}]},
+                     {"results": [{"title": "Bad", "url": "https://exa\nmple.org", "content": "x"}]}):
+            client = real_client(base_url="https://example.test", transport=httpx.MockTransport(
+                lambda request, data=data: httpx.Response(200, json=data)
+            ))
+            with self.subTest(data=data), patch.object(ollama.httpx, "Client", return_value=client):
+                with self.assertRaises(ValueError):
+                    ollama.web_search("query")
+
     def stream(self, lines):
         transport = httpx.MockTransport(lambda request: httpx.Response(200, text="\n".join(lines)))
         client = httpx.Client(transport=transport, base_url="https://test.invalid/v1")

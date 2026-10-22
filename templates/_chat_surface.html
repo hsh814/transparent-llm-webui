@@ -35,12 +35,32 @@
   <button class="btn-mini jump-latest" type="button" hidden>↓ Latest message</button>
   <form class="composer" data-session-id="{{ session.id }}" data-mode="{{ folder.type }}"
         hx-post="/sessions/{{ session.id }}/{{ 'memo' if folder.type == 'memo' else 'send' }}"
-        hx-target="#message-list" hx-swap="beforeend" hx-disabled-elt="find button[type=submit]" hx-sync="this:drop">
+        hx-target="#message-list" hx-swap="beforeend" hx-disabled-elt="find button[type=submit]" hx-sync="this:drop"
+        enctype="{{ 'multipart/form-data' if folder.type == 'chat' else 'application/x-www-form-urlencoded' }}" hx-encoding="{{ 'multipart/form-data' if folder.type == 'chat' else 'application/x-www-form-urlencoded' }}">
     <textarea name="content" rows="1" aria-label="{{ 'Note' if folder.type == 'memo' else 'Message' }}"
-              placeholder="{{ 'Write something worth keeping…' if folder.type == 'memo' else 'Paste the text you want to translate…' if folder.type == 'translation' else 'Ask anything, think out loud…' }}" required></textarea>
-    <div class="composer-actions"><span class="composer-status" role="status"></span>
-      <button type="button" class="btn-stop" hx-post="/sessions/{{ session.id }}/stop" hx-target="#message-list" hx-swap="innerHTML" hx-disabled-elt="this" hidden>■ Stop</button>
-      <button type="submit" class="btn">{{ 'Save note' if folder.type == 'memo' else 'Translate' if folder.type == 'translation' else 'Send' }} <span aria-hidden="true">↑</span></button>
+              placeholder="{{ 'Write something worth keeping…' if folder.type == 'memo' else 'Paste the text you want to translate…' if folder.type == 'translation' else 'Ask anything, think out loud…' }}"{% if folder.type != 'chat' %} required{% endif %}></textarea>
+    {% if folder.type == 'chat' %}
+    <div class="composer-extras" id="composer-extras-{{ session.id }}" hidden>
+      <label class="attachment-picker btn-mini">Attach images or PDF
+        <input class="attachment-input" type="file" name="files" accept="image/png,image/jpeg,image/webp,application/pdf,.png,.jpg,.jpeg,.webp,.pdf" multiple aria-label="Attach images or PDF">
+      </label>
+      <label class="search-opt-in"><input type="checkbox" name="web_search" value="true"> Web search</label>
+      <label class="search-query" hidden>Search query override (optional)
+        <input type="text" name="search_query" placeholder="Uses your message when blank" disabled>
+      </label>
+      <ul class="attachment-drafts" aria-label="Unsubmitted attachments" hidden></ul>
+      <p class="file-draft-note" hidden>Unsubmitted files stay in memory across chats; reloading loses them.</p>
+    </div>
+    {% endif %}
+    <span class="composer-status" role="status"></span>
+    <div class="composer-toolbar">
+      {% if folder.type == 'chat' %}
+      <button class="btn-mini input-tools-toggle" type="button" aria-expanded="false" aria-controls="composer-extras-{{ session.id }}">More inputs <span class="input-summary" aria-live="polite" hidden></span></button>
+      {% endif %}
+      <div class="composer-actions">
+        <button type="button" class="btn-stop" hx-post="/sessions/{{ session.id }}/stop" hx-target="#message-list" hx-swap="innerHTML" hx-disabled-elt="this" hidden>■ Stop</button>
+        <button type="submit" class="btn">{{ 'Save note' if folder.type == 'memo' else 'Translate' if folder.type == 'translation' else 'Send' }} <span aria-hidden="true">↑</span></button>
+      </div>
     </div>
   </form>
   <div class="composer-hint">{% if folder.type == 'memo' %}Only saved here. Never sent to a model.{% elif folder.type == 'translation' %}Translated in chunks of {{ folder.chunk_limit or 1000 }} characters. Each chunk uses the visible system prompt.{% else %}Enter to send · Shift + Enter for a new line{% endif %}<span>Drafts saved in this browser</span></div>

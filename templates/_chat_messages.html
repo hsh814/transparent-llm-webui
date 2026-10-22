@@ -5,6 +5,7 @@
 {{ generation_bubble(request, session, message.job, connect=message.connect) | safe }}
 {% else %}
 {% set is_last = latest and message.id == latest.id %}
+{% set job = message.job | default(None) %}
 {% include "_message_bubble.html" %}
 {% endif %}
 {% endfor %}

@@ -5,11 +5,12 @@ import json
 import re
 from html import escape
 
-from fastapi import APIRouter, Form, HTTPException, Request
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, StreamingResponse
 
 import db
 import generation
+import inputs
 import templating
 
 router = APIRouter()
@@ -69,17 +70,29 @@ def _messages(request: Request, session: dict) -> str:
 
 
 @router.post("/sessions/{session_id}/send", response_class=HTMLResponse)
-def send_message(request: Request, session_id: int, content: str = Form(...)):
+def send_message(
+    request: Request, session_id: int, content: str = Form(""),
+    files: list[UploadFile] | None = File(None),
+    web_search: bool = Form(False), search_query: str = Form(""),
+):
     session = _session(session_id)
     folder = db.get_folder(session["folder_id"])
     if folder["type"] == "memo":
         raise HTTPException(403, "Use Save note in a memo folder.")
+    if folder["type"] != "chat" and (files or web_search):
+        raise HTTPException(400, "Attachments and web search are available in Chat folders.")
     text = content.strip()
-    if not text:
-        raise HTTPException(400, "Write a message first.")
+    if not text and not files:
+        raise HTTPException(400, "Write a message or attach an image or PDF first.")
+    query = (search_query.strip() or text) if web_search else None
+    if web_search and not query:
+        raise HTTPException(400, "Enter a search query or message when web search is enabled.")
     chunks = _split_translation(text, folder["chunk_limit"] or 1000) if folder["type"] == "translation" else [text]
     try:
-        rows = db.enqueue_turns(session_id, chunks)
+        attachments = inputs.prepare_uploads(files or [])
+        rows = db.enqueue_turns(session_id, chunks, attachments=attachments, search_query=query)
+    except inputs.AttachmentError as exc:
+        raise HTTPException(400, str(exc)) from exc
     except db.GenerationBusy as exc:
         raise HTTPException(409, str(exc)) from exc
     except ValueError as exc:
@@ -105,11 +118,17 @@ def stream_message(request: Request, session_id: int, since: int):
 
     async def events():
         content_pos = reasoning_pos = ticks = 0
+        search_snapshot = None
         while not await request.is_disconnected():
             job = db.get_generation(session_id, since)
             if job is None:
                 yield _sse("done", "<div></div>")
                 return
+            if job["search_json"] != search_snapshot:
+                search_snapshot = job["search_json"]
+                yield _sse("search", templating.templates.env.get_template("_search.html").render(
+                    search=json.loads(search_snapshot) if search_snapshot else None,
+                ))
             for key, position in (("content", content_pos), ("reasoning", reasoning_pos)):
                 if len(job[key]) > position:
                     # htmx inserts SSE as HTML: wrap escaped text to preserve whitespace.
@@ -197,10 +216,13 @@ def show_prompt(request: Request, session_id: int, message_id: int):
     session = _session(session_id)
     folder = db.get_folder(session["folder_id"])
     rows = db.list_messages(session_id)
-    message = next((m for m in rows if m["id"] == message_id and m["role"] == "assistant"), None)
+    message = next((m for m in rows if m["id"] == message_id and m["role"] in ("user", "assistant")), None)
     if message is None:
-        raise HTTPException(404, "Response not found.")
-    job = next((j for j in db.list_generations(session_id) if j["assistant_message_id"] == message_id), None)
+        raise HTTPException(404, "Request or response not found.")
+    job = next((j for j in db.list_generations(session_id)
+                if j["assistant_message_id"] == message_id or j["user_message_id"] == message_id), None)
+    if job is None and message["role"] == "user":
+        raise HTTPException(404, "The original request was not stored for this message.")
     note = None
     if job is not None:
         messages = json.loads(job["messages_json"])
@@ -215,9 +237,13 @@ def show_prompt(request: Request, session_id: int, message_id: int):
         prompt = db.get_system_prompt_by_hash(message["system_prompt_hash"]) if message["system_prompt_hash"] else folder["system_prompt"]
         if prompt:
             messages.insert(0, {"role": "system", "content": prompt})
+    user = next((m for m in rows if job and m["id"] == job["user_message_id"]), None)
     return templating.templates.TemplateResponse(request, "_prompt_viewer.html", {
         "session": session, "message": message, "messages": messages,
         "messages_json": json.dumps(messages, ensure_ascii=False, indent=2),
         "sys_note": note, "recorded": job is not None,
         "request_params": json.loads(job["params_json"]) if job else None,
+        "job": job,
+        "attachments": json.loads(user["attachments_json"]) if user else [],
+        "search": json.loads(job["search_json"]) if job and job["search_json"] else None,
     })

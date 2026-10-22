@@ -11,6 +11,8 @@ import sqlite3
 import threading
 from pathlib import Path
 
+import inputs
+
 DB_PATH = Path(os.environ.get("CHAT_DB_PATH", Path(__file__).parent / "chat.db"))
 
 _lock = threading.Lock()
@@ -50,6 +52,8 @@ CREATE TABLE IF NOT EXISTS messages (
   prompt_tokens INTEGER,
   completion_tokens INTEGER,
   total_tokens INTEGER,
+  attachments_json TEXT NOT NULL DEFAULT '[]',
+  api_content_json TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -64,6 +68,7 @@ CREATE TABLE IF NOT EXISTS generations (
   model TEXT NOT NULL,
   params_json TEXT NOT NULL,
   messages_json TEXT NOT NULL,
+  search_json TEXT,
   system_prompt_hash TEXT,
   batch_id INTEGER,
   attempt INTEGER NOT NULL DEFAULT 0,
@@ -123,6 +128,13 @@ def init_db() -> None:
                 conn.execute(f"ALTER TABLE messages ADD COLUMN {col} INTEGER")
         if "system_prompt_hash" not in msg_cols:
             conn.execute("ALTER TABLE messages ADD COLUMN system_prompt_hash TEXT")
+        if "attachments_json" not in msg_cols:
+            conn.execute("ALTER TABLE messages ADD COLUMN attachments_json TEXT NOT NULL DEFAULT '[]'")
+        if "api_content_json" not in msg_cols:
+            conn.execute("ALTER TABLE messages ADD COLUMN api_content_json TEXT")
+        generation_cols = {row["name"] for row in conn.execute("PRAGMA table_info(generations)")}
+        if "search_json" not in generation_cols:
+            conn.execute("ALTER TABLE generations ADD COLUMN search_json TEXT")
         # Backfill labels without making old conversations look newly modified.
         for row in conn.execute("SELECT id FROM sessions WHERE auto_title = 1").fetchall():
             _refresh_auto_title(conn, row["id"])
@@ -513,8 +525,14 @@ class GenerationBusy(ValueError):
     pass
 
 
-def enqueue_turns(session_id: int, chunks: list[str]) -> list[dict]:
+def enqueue_turns(session_id: int, chunks: list[str], *, attachments: list[dict] | None = None,
+                  search_query: str | None = None) -> list[dict]:
     """Atomically save input and the exact request, before any network work."""
+    attachments = attachments or []
+    if search_query is not None and (not isinstance(search_query, str) or not search_query.strip()):
+        raise ValueError("Enter a search query or a message to search for.")
+    if (attachments or search_query is not None) and len(chunks) != 1:
+        raise ValueError("Attachments and web search require a single Chat message.")
     with _lock, _get_conn() as conn:
         session = conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
         if session is None:
@@ -522,6 +540,8 @@ def enqueue_turns(session_id: int, chunks: list[str]) -> list[dict]:
         folder = conn.execute("SELECT * FROM folders WHERE id = ?", (session["folder_id"],)).fetchone()
         if folder["type"] == "memo":
             raise ValueError("This folder stores notes")
+        if folder["type"] != "chat" and (attachments or search_query is not None):
+            raise ValueError("Attachments and web search are only available in Chat folders.")
         if conn.execute(
             "SELECT 1 FROM generations WHERE session_id = ? AND status IN ('queued', 'running')",
             (session_id,),
@@ -530,25 +550,35 @@ def enqueue_turns(session_id: int, chunks: list[str]) -> list[dict]:
         prompt = folder["system_prompt"]
         prompt_hash = hashlib.sha256(prompt.encode()).hexdigest()
         conn.execute("INSERT OR IGNORE INTO system_prompts VALUES (?, ?)", (prompt_hash, prompt))
-        history = [dict(row) for row in conn.execute(
-            "SELECT role, content FROM messages WHERE session_id = ? AND role IN ('user', 'assistant') ORDER BY id",
-            (session_id,),
-        )]
+        history = [
+            {"role": row["role"], "content": json.loads(row["api_content_json"])
+             if row["api_content_json"] is not None else row["content"]}
+            for row in conn.execute(
+                "SELECT role, content, api_content_json FROM messages"
+                " WHERE session_id = ? AND role IN ('user', 'assistant') ORDER BY id",
+                (session_id,),
+            )
+        ]
         prefix = [{"role": "system", "content": prompt}] if prompt else []
         ids = []
         for chunk in chunks:
+            api_content = inputs.build_content(chunk, attachments)
+            search = ({"query": search_query, "max_results": 5, "status": "pending", "results": []}
+                      if search_query is not None else None)
             cur = conn.execute(
-                "INSERT INTO messages (session_id, role, content, system_prompt_hash) VALUES (?, 'user', ?, ?)",
-                (session_id, chunk, prompt_hash),
+                "INSERT INTO messages (session_id, role, content, system_prompt_hash, attachments_json, api_content_json)"
+                " VALUES (?, 'user', ?, ?, ?, ?)",
+                (session_id, chunk, prompt_hash, json.dumps(attachments), json.dumps(api_content)),
             )
             user_id = cur.lastrowid
-            messages = prefix + (history if folder["type"] == "chat" else []) + [{"role": "user", "content": chunk}]
+            messages = prefix + (history if folder["type"] == "chat" else []) + [{"role": "user", "content": api_content}]
             conn.execute(
-                "INSERT INTO generations (user_message_id, session_id, model, params_json, messages_json, system_prompt_hash, batch_id)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO generations (user_message_id, session_id, model, params_json, messages_json, system_prompt_hash, batch_id, search_json)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (user_id, session_id, session["model"],
                  json.dumps({k: v for k, v in json.loads(session["params_json"]).items() if k in DEFAULT_PARAMS}),
-                 json.dumps(messages), prompt_hash, ids[0] if ids else user_id),
+                 json.dumps(messages), prompt_hash, ids[0] if ids else user_id,
+                 json.dumps(search) if search is not None else None),
             )
             ids.append(user_id)
         _refresh_auto_title(conn, session_id)
@@ -614,6 +644,29 @@ def update_generation(job: dict, content: str, reasoning: str) -> bool:
             "UPDATE generations SET content = ?, reasoning = ? WHERE user_message_id = ? AND attempt = ? AND status = 'running'",
             (content, reasoning, job["user_message_id"], job["attempt"]),
         ).rowcount == 1
+
+
+def save_search_preparation(job: dict, search: dict, messages: list[dict] | None = None) -> bool:
+    """CAS search state and the exact enriched request together before model I/O."""
+    with _lock, _get_conn() as conn:
+        if messages is None:
+            changed = conn.execute(
+                "UPDATE generations SET search_json = ?"
+                " WHERE user_message_id = ? AND attempt = ? AND status = 'running'",
+                (json.dumps(search), job["user_message_id"], job["attempt"]),
+            ).rowcount
+        else:
+            changed = conn.execute(
+                "UPDATE generations SET search_json = ?, messages_json = ?"
+                " WHERE user_message_id = ? AND attempt = ? AND status = 'running'",
+                (json.dumps(search), json.dumps(messages), job["user_message_id"], job["attempt"]),
+            ).rowcount
+            if changed:
+                conn.execute(
+                    "UPDATE messages SET api_content_json = ? WHERE id = ?",
+                    (json.dumps(messages[-1]["content"]), job["user_message_id"]),
+                )
+        return changed == 1
 
 
 def finish_generation(job: dict, content: str, reasoning: str, usage: dict | None) -> None:

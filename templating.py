@@ -3,6 +3,7 @@
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from fastapi.templating import Jinja2Templates
 
@@ -29,6 +30,29 @@ def _from_json(value: str) -> dict:
 
 
 templates.env.filters["from_json"] = _from_json
+
+
+def _http_url(value) -> str:
+    """Only web source URLs may become clickable links."""
+    if not isinstance(value, str) or any(c.isspace() or ord(c) < 32 for c in value):
+        return ""
+    try:
+        parsed = urlsplit(value)
+        return value if parsed.scheme.lower() in ("http", "https") and parsed.hostname else ""
+    except ValueError:
+        return ""
+
+
+def _image_url(value) -> str:
+    if isinstance(value, str) and value.startswith((
+        "data:image/jpeg;base64,", "data:image/png;base64,", "data:image/webp;base64,"
+    )):
+        return value
+    return ""
+
+
+templates.env.filters["http_url"] = _http_url
+templates.env.filters["image_url"] = _image_url
 
 
 def _utc_iso(value: str) -> str:
@@ -72,10 +96,11 @@ def chat_messages(session_id: int) -> list[dict]:
     for row in rows:
         if row["id"] in answers:
             continue
-        result.append(row)
-        if job := jobs.get(row["id"]):
+        job = jobs.get(row["id"])
+        result.append({**row, "job": job})
+        if job:
             if job["assistant_message_id"] in by_id:
-                result.append(by_id[job["assistant_message_id"]])
+                result.append({**by_id[job["assistant_message_id"]], "job": job})
             elif job["status"] != "completed":
                 result.append({"role": "generation", "id": row["id"], "job": job, "connect": live == row["id"]})
     return result
@@ -85,7 +110,7 @@ def generation_bubble(request, session: dict, job: dict, oob=False, connect=None
     if job["status"] == "completed":
         message = next((m for m in db.list_messages(session["id"]) if m["id"] == job["assistant_message_id"]), None)
         inner = templates.env.get_template("_message_bubble.html").render(
-            request=request, session=session, message=message,
+            request=request, session=session, message=message, job=job,
             is_last=message["id"] == (db.last_message(session["id"]) or {}).get("id"),
         ) if message else ""
     else:

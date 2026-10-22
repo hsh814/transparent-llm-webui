@@ -98,7 +98,8 @@ def message_controls(session: dict, message: dict, *, rows=None, jobs=None) -> d
         "is_last": bool(latest and latest["id"] == message["id"]),
         "can_respond": model_conversation and message["role"] == "user",
         "has_trace": any(job["user_message_id"] == message["id"] and job.get("trace") for job in jobs),
-        "can_regenerate": model_conversation and message["role"] == "assistant",
+        "can_regenerate": model_conversation and message["role"] == "assistant"
+        and (bool(message.get("user_message_id")) or not message.get("provenance")),
         "active": any(job["status"] in ("queued", "running") for job in jobs),
         "variants": db.response_variant_state(session["id"], message["user_message_id"])
         if message.get("user_message_id") else None,
@@ -174,10 +175,10 @@ def folder_list_inner(request, current_folder_id=None, current_session_id=None) 
     )
 
 
-def chat_surface_fragment(request, folder, session, oob=False) -> str:
+def chat_surface_fragment(request, folder, session, oob=False, *, editor_web_search=None) -> str:
     """Full `<div id="chat-surface">` fragment; `oob` marks it for out-of-band swap."""
     inner = templates.env.get_template("_chat_surface.html").render(
-        request=request, folder=folder, session=session
+        request=request, folder=folder, session=session, editor_web_search=editor_web_search,
     )
     attr = ' hx-swap-oob="true"' if oob else ""
     return f'<div id="chat-surface"{attr}>{inner}</div>'

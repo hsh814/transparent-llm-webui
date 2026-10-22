@@ -109,8 +109,16 @@ def _search_arguments(job: dict, call: dict) -> tuple[str, int]:
 
 def _execute_tools(job: dict) -> dict | None:
     calls = pending_calls(job["trace"])
-    call_count = sum(len(event["message"].get("tool_calls", []))
-                     for event in job["trace"] if event["kind"] == "assistant")
+    retained_results = {
+        event["message"]["tool_call_id"] for event in job["trace"]
+        if event["kind"] == "tool" and event.get("retained") and event.get("message") is not None
+        and event["status"] in ("completed", "failed")
+    }
+    call_count = sum(
+        call["id"] not in retained_results
+        for event in job["trace"] if event["kind"] == "assistant"
+        for call in event["message"].get("tool_calls", [])
+    )
     if call_count > MAX_TOOL_CALLS:
         raise ollama.ToolCallError(
             "The model exceeded the limit of eight tool calls for one response. "

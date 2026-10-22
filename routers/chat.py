@@ -170,6 +170,65 @@ def retry_generation(request: Request, session_id: int, web_search: bool = Form(
     return _messages(request, session) + templating.session_sidebar(request, session)
 
 
+@router.get("/sessions/{session_id}/edit", response_class=HTMLResponse)
+def edit_conversation(request: Request, session_id: int, focus: int | None = None):
+    _session(session_id)
+    try:
+        snapshot = db.edit_snapshot(session_id)
+    except (db.GenerationBusy, ValueError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return templating.templates.TemplateResponse(request, "_batch_editor.html", {
+        "snapshot": snapshot, "session": snapshot["session"],
+        "folder": snapshot["folder"], "focus_message": focus,
+        "editor_rows": sorted(
+            [dict(message, editor_kind="message") for message in snapshot["messages"]]
+            + [dict(group, editor_kind="tool") for group in snapshot["tool_groups"]],
+            key=lambda row: row["position"],
+        ),
+    })
+
+
+@router.post("/sessions/{session_id}/edit", response_class=HTMLResponse)
+def save_edited_conversation(
+    request: Request, session_id: int, draft: str = Form(...),
+    intent: str = Form("save"), web_search: bool = Form(False),
+):
+    _session(session_id)
+    if intent not in ("save", "send"):
+        raise HTTPException(422, "Choose Save as fork or Save & send.")
+    try:
+        parsed = json.loads(draft)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(422, "The editor draft could not be read. Your edits are still open.") from exc
+    try:
+        fork = db.save_edited_fork(
+            session_id, parsed, send=intent == "send", web_search=intent == "send" and web_search,
+        )
+    except (db.GenerationBusy, db.EditConflict) as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    if intent == "send":
+        generation.start(fork["id"])
+    folder = db.get_folder(fork["folder_id"])
+    return templating.folder_list_inner(
+        request, current_folder_id=folder["id"], current_session_id=fork["id"],
+    ) + templating.chat_surface_fragment(
+        request, folder, fork, oob=True, editor_web_search=intent == "send" and web_search,
+    )
+
+
+@router.get("/sessions/{session_id}/messages/{message_id}/source", response_class=HTMLResponse)
+def show_message_source(request: Request, session_id: int, message_id: int):
+    session = _session(session_id)
+    message = next((row for row in db.list_messages(session_id) if row["id"] == message_id), None)
+    if message is None or not message.get("provenance"):
+        raise HTTPException(404, "No edit provenance is stored for this message.")
+    return templating.templates.TemplateResponse(request, "_source_viewer.html", {
+        "session": session, "message": message, "provenance": message["provenance"],
+    })
+
+
 @router.post("/sessions/{session_id}/messages/{message_id}/fork", response_class=HTMLResponse)
 def fork_conversation(request: Request, session_id: int, message_id: int):
     _session(session_id)
@@ -279,11 +338,31 @@ def show_prompt(request: Request, session_id: int, message_id: int):
     if message is None:
         raise HTTPException(404, "Request or response not found.")
     job = db.get_message_generation(session_id, message_id)
+    provenance = message.get("provenance")
+    historical = provenance if message["role"] == "assistant" else None
+    if historical:
+        original = historical.get("source_request")
+        job = {
+            "messages": original.get("messages", []), "params": original.get("params", {}),
+            "tools": original.get("tools", []), "request": original,
+            "model": original.get("model") or historical.get("source_model"),
+            "status": "historical", "user_message_id": None,
+        } if original else None
     if job is None and message["role"] == "user":
         raise HTTPException(404, "The original request was not stored for this message.")
-    note = None
+    note = (
+        "Actual original response request, not the edited fork context. The saved response text is "
+        + ("manually edited, not a new model output." if historical["kind"] == "manual" else "carried from the earlier context.")
+        if historical and job else
+        "The actual original response request was not recorded; no replacement request has been invented."
+        if historical else
+        "Current saved request for the edited input. This is not a claim that it has been sent to the model."
+        if provenance and message["role"] == "user" else None
+    )
     if job is not None:
         messages = job["messages"]
+    elif historical:
+        messages = []
     else:
         note = "Legacy response: this is a best-effort reconstruction; the original request was not stored."
         visible = db.visible_messages(session_id)

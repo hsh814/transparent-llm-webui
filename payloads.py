@@ -70,12 +70,20 @@ class Store:
             return body[key] if body else None
         raise ValueError("Scalar payloads have no children")
 
-    def get(self, id_: str):
+    def list_children(self, id_: str) -> tuple[str, ...]:
+        """Inspect list membership without decoding large immutable descendants."""
+        kind, body = self._node(id_)
+        if kind != "list":
+            raise ValueError("Expected a list payload")
+        return tuple(body)
+
+    def get(self, id_: str, *, exclude_keys: frozenset[str] = frozenset()):
         kind, body = self._node(id_)
         if kind == "object":
-            return {key: self.get(child) for key, child in body.items()}
+            return {key: self.get(child, exclude_keys=exclude_keys)
+                    for key, child in body.items() if key not in exclude_keys}
         if kind == "list":
-            return [self.get(child) for child in body]
+            return [self.get(child, exclude_keys=exclude_keys) for child in body]
         return body
 
 
@@ -93,6 +101,7 @@ def collect(conn: sqlite3.Connection) -> None:
         WITH RECURSIVE live(id) AS (
           SELECT attachments_id FROM messages WHERE attachments_id IS NOT NULL
           UNION SELECT api_content_id FROM messages WHERE api_content_id IS NOT NULL
+          UNION SELECT provenance_id FROM messages WHERE provenance_id IS NOT NULL
           UNION SELECT request_id FROM generations
           UNION SELECT base_request_id FROM generations WHERE base_request_id IS NOT NULL
           UNION SELECT trace_id FROM generations WHERE trace_id IS NOT NULL

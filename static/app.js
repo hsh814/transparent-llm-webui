@@ -132,6 +132,7 @@
     const saved = $$('.message[data-message-role]', list).filter(el => el.dataset.messageRole !== 'system');
     const lastMessage = saved.at(-1);
     const busy = pending.length > 0 || !!activeMessageRequest;
+    $$('.open-batch-editor').forEach(button => { button.disabled = busy; });
     saved.forEach(message => {
       const terminal = message === lastMessage;
       message.dataset.terminal = String(terminal);
@@ -166,6 +167,128 @@
     const jump = $('.jump-latest');
     if (jump) jump.hidden = followLatest;
   }
+  function editorDraft(form) {
+    const snapshot = form._snapshot;
+    return {
+      revision: snapshot.revision,
+      messages: snapshot.messages.map(message => {
+        const row = $(`[data-message-id="${message.id}"]`, form);
+        return {id: message.id, include: $('.batch-include-message', row).checked,
+          content: $('.batch-content', row).value,
+          attachments: $$('.batch-attachment:checked', row).map(input => Number(input.dataset.index))};
+      }),
+      tools: snapshot.tool_groups.map(group => {
+        const row = $$('.batch-tool-row', form).find(element => element.dataset.toolKey === group.key);
+        return {key: group.key, include: $('.batch-include-tool', row).checked, explicit: row._explicitChoice !== undefined};
+      }),
+    };
+  }
+  function updateEditor(form) {
+    if (!form._snapshot || form._busy) return;
+    const snapshot = form._snapshot;
+    let firstChange = Infinity;
+    let changed = 0;
+    let excluded = 0;
+    const states = snapshot.messages.map(message => {
+      const row = $(`[data-message-id="${message.id}"]`, form);
+      const include = $('.batch-include-message', row).checked;
+      const attachments = $$('.batch-attachment:checked', row).map(input => Number(input.dataset.index));
+      const edited = include && ($('.batch-content', row).value !== message.content
+        || attachments.join(',') !== message.attachments.map(attachment => attachment.index).join(','));
+      if (!include || edited) firstChange = Math.min(firstChange, message.position);
+      if (edited) changed++;
+      if (!include) excluded++;
+      row.classList.toggle('batch-excluded', !include);
+      $('.batch-content', row).disabled = !include;
+      $$('.batch-attachment', row).forEach(input => { input.disabled = !include; });
+      return {message, row, include, edited};
+    });
+    const includedUsers = new Set(states.filter(state => state.include && state.message.role === 'user').map(state => state.message.id));
+    const groups = snapshot.tool_groups.map(group => {
+      const row = $$('.batch-tool-row', form).find(element => element.dataset.toolKey === group.key);
+      const available = group.complete && includedUsers.has(group.user_message_id);
+      if (!available || row._explicitChoice === false) firstChange = Math.min(firstChange, group.position);
+      return {group, row, available};
+    });
+    let keptTools = 0;
+    groups.sort((a, b) => a.group.position - b.group.position).forEach(({group, row, available}) => {
+      const input = $('.batch-include-tool', row);
+      input.disabled = !available;
+      input.checked = available && (row._explicitChoice ?? (group.position < firstChange));
+      if (!input.checked) firstChange = Math.min(firstChange, group.position);
+      else keptTools++;
+      row.classList.toggle('batch-excluded', !input.checked);
+      $('.batch-tool-state', row).textContent = !group.complete ? 'Incomplete — cannot reuse'
+        : !available ? 'Anchor user excluded' : input.checked ? (row._explicitChoice === true ? 'Explicit reuse · not rerun' : 'Unchanged history · not rerun')
+        : 'Excluded' + (row._explicitChoice === undefined ? ' after context change' : ' by choice');
+    });
+    let carried = 0;
+    const preview = $('#batch-preview-list', form);
+    preview.replaceChildren();
+    states.forEach(({message, row, include, edited}) => {
+      const isCarried = include && !edited && message.role === 'assistant' && message.position > firstChange;
+      if (isCarried) carried++;
+      const label = !include ? 'Excluded' : edited ? (message.role === 'assistant' ? 'Manual response' : 'Edited input')
+        : isCarried ? 'Carried from earlier context' : 'Unchanged';
+      $('.batch-row-state', row).textContent = label;
+      if (!include) return;
+      const item = document.createElement('li');
+      item.textContent = `${message.role} · ${label}: ${$('.batch-content', row).value.slice(0, 140) || '[attachment-only input]'}`;
+      preview.append(item);
+    });
+    const kept = states.filter(state => state.include);
+    const canSend = form.dataset.mode !== 'memo' && kept.at(-1)?.message.role === 'user';
+    $('#batch-editor-send', form).disabled = !canSend;
+    $('#batch-send-note', form).textContent = canSend
+      ? 'Save & send queues only the final included user request. Earlier answers and reused tools are not rerun.'
+      : form.dataset.mode === 'memo' ? 'Memo only saves notes; it never calls a model.'
+      : 'Save as fork is available. To send, the last included message must be a user request.';
+    $('#batch-editor-summary', form).textContent = `${kept.length} messages kept · ${changed} edited · ${excluded} excluded · ${carried} carried answers · ${keptTools}/${groups.length} tool batches reused. Saving creates one independent fork.`;
+    $('[name="draft"]', form).value = JSON.stringify(editorDraft(form));
+  }
+  function closeEditor(dialog) {
+    if ($('#batch-editor-form', dialog)?._busy) return;
+    const opener = dialog._opener;
+    dialog.close();
+    dialog.remove();
+    if (opener?.isConnected) opener.focus({preventScroll: true});
+  }
+  function initializeEditor() {
+    const dialog = $('#batch-editor');
+    if (!dialog || dialog.open) return;
+    const form = $('#batch-editor-form', dialog);
+    form._snapshot = JSON.parse($('#batch-editor-snapshot', dialog).textContent);
+    dialog._opener = document.activeElement;
+    dialog.addEventListener('cancel', event => { event.preventDefault(); closeEditor(dialog); });
+    dialog.addEventListener('input', event => {
+      if (event.target.matches('.batch-include-tool')) event.target.closest('.batch-tool-row')._explicitChoice = event.target.checked;
+      updateEditor(form);
+    });
+    dialog.addEventListener('change', event => {
+      if (event.target.matches('.batch-include-tool')) event.target.closest('.batch-tool-row')._explicitChoice = event.target.checked;
+      updateEditor(form);
+    });
+    updateEditor(form);
+    dialog.showModal();
+    const focus = dialog.dataset.focusMessage;
+    const textarea = focus ? $(`#batch-content-${focus}`, dialog) : $('.batch-content', dialog);
+    (textarea || $('.batch-editor-cancel', dialog)).focus();
+  }
+  function setEditorBusy(form, busy) {
+    form._busy = busy;
+    form.setAttribute('aria-busy', String(busy));
+    $$('input, textarea, button', form).forEach(input => { input.disabled = busy; });
+    if (!busy) updateEditor(form);
+  }
+  function showRequestError(event, message) {
+    const form = event.detail.requestConfig?.elt || event.detail.elt;
+    if (form?.id === 'batch-editor-form' && form.isConnected) {
+      const error = $('#batch-editor-error', form);
+      error.textContent = message;
+      error.hidden = false;
+      error.scrollIntoView({ block: 'center' });
+    } else toast(message, true);
+  }
   function filterChats() {
     const query = ($('#chat-search')?.value || '').trim().toLowerCase();
     $$('.folder-item').forEach(folder => {
@@ -190,6 +313,7 @@
   function initialize() {
     const surface = $('#chat-surface');
     const form = $('form.composer');
+    initializeEditor();
     if (form && !readyForms.has(form)) {
       readyForms.add(form);
       const textarea = $('textarea', form);
@@ -198,7 +322,7 @@
       if (form.dataset.mode === 'chat') {
         let saved = {};
         try { saved = JSON.parse(storage('getItem', searchKey(form)) || '{}') || {}; } catch (_) { /* Ignore invalid saved settings. */ }
-        $('[name="web_search"]', form).checked = saved.enabled === true;
+        $('[name="web_search"]', form).checked = form.hasAttribute('data-editor-web-search') ? form.dataset.editorWebSearch === 'true' : saved.enabled === true;
         $('.attachment-input', form).value = '';
         saveSearch(form);
         renderAttachments(form);
@@ -291,6 +415,10 @@
     }
   });
   document.addEventListener('keydown', event => {
+    if ($('#batch-editor[open]')) {
+      if ((event.metaKey || event.ctrlKey) && ['k', 'enter'].includes(event.key.toLowerCase())) event.preventDefault();
+      return;
+    }
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
       event.preventDefault(); $('.new-conversation')?.click();
     }
@@ -311,6 +439,7 @@
   });
   document.addEventListener('click', event => {
     const target = event.target;
+    if (target.closest('.batch-editor-cancel')) { closeEditor($('#batch-editor')); return; }
     if (!target.closest('.params-toggle')) $$('.params-toggle[open]').forEach(details => { details.open = false; });
     if (target.closest('.menu-btn')) drawer(!$('.layout').classList.contains('nav-open'));
     if (target.closest('.scrim')) drawer(false);
@@ -359,6 +488,10 @@
   });
   document.body.addEventListener('htmx:configRequest', event => {
     const form = event.detail.elt;
+    if (form.id === 'batch-editor-form') {
+      updateEditor(form);
+      event.detail.parameters.draft = JSON.stringify(editorDraft(form));
+    }
     const composer = $('form.composer');
     if (form.matches('form.composer, .request-response, .regenerate-response, .retry-generation')) {
       event.detail.parameters.web_search = $('[name="web_search"]', composer || document)?.checked ? 'true' : 'false';
@@ -375,10 +508,13 @@
     const title = $('.title-input', form);
     if (title) form._submittedTitle = title.value;
     const sendsMessage = form.matches('form.composer');
+    const editsMessages = form.id === 'batch-editor-form';
     const mutatesMessage = form.matches('[data-message-mutation]');
-    if (sendsMessage || mutatesMessage) {
+    if (sendsMessage || mutatesMessage || editsMessages) {
       if (activeMessageRequest || $('#message-list [data-generation-status="queued"], #message-list [data-generation-status="running"]')) {
-        event.preventDefault(); return;
+        event.preventDefault();
+        if (editsMessages) toast('The source chat is busy. Your edits remain open; wait until it is idle before saving.', true);
+        return;
       }
       if (sendsMessage && !hasContent(form)) { event.preventDefault(); return; }
       activeMessageRequest = event.detail.xhr;
@@ -387,12 +523,17 @@
         followLatest = true;
       }
       syncMessages();
+      if (editsMessages) {
+        $('#batch-editor-error', form).hidden = true;
+        setEditorBusy(form, true);
+      }
     }
   });
   document.body.addEventListener('htmx:afterRequest', event => {
     const form = event.detail.requestConfig?.elt || event.detail.elt;
     // htmx retargets afterRequest when a message action replaces its own button.
     if (activeMessageRequest === event.detail.xhr) activeMessageRequest = null;
+    if (form.id === 'batch-editor-form' && form.isConnected) setEditorBusy(form, false);
     const title = $('.title-input', form);
     const savedTitle = $('.session-item.active .session-title');
     if (event.detail.successful && title && savedTitle && title.value === form._submittedTitle) {
@@ -421,14 +562,15 @@
   });
   ['htmx:afterSwap', 'htmx:afterSettle', 'htmx:oobAfterSwap', 'htmx:historyRestore'].forEach(name => document.body.addEventListener(name, () => requestAnimationFrame(initialize)));
   document.body.addEventListener('htmx:responseError', event => {
-    let message = 'The request failed. Your draft is saved. Please try again.';
+    let message = 'The request failed. Please try again.';
     try {
       const detail = JSON.parse(event.detail.xhr.responseText).detail;
       message = typeof detail === 'string' ? detail : detail.map(error => `${error.loc.at(-1)}: ${error.msg}`).join(' · ');
     } catch (_) { /* Non-JSON errors use the safe fallback. */ }
-    toast(message, true);
+    showRequestError(event, message);
   });
-  ['htmx:sendError', 'htmx:timeout'].forEach(name => document.body.addEventListener(name, () => toast('Connection lost. Your draft is saved. Please try again.', true)));
+  ['htmx:sendError', 'htmx:timeout'].forEach(name => document.body.addEventListener(name, event =>
+    showRequestError(event, 'Connection lost. Please try again.')));
   document.body.addEventListener('htmx:sseError', () => {
     const status = $('.composer-status');
     if (status) status.textContent = 'Reconnecting… Your response is saved on the server.';

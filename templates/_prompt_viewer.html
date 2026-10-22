@@ -12,9 +12,14 @@
   {% if active_job and active_job.status in ('queued', 'idle') %}
   <p class="preparation-notice">Saved request is {{ 'idle until you explicitly continue' if active_job.status == 'idle' else 'queued for this attempt' }}. This view does not confirm delivery to the model.</p>
   {% else %}
+  {% if message and message.provenance and message.role == 'assistant' and not recorded %}
+  <p>The actual original request is unavailable. This viewer does not reconstruct one from the edited conversation.</p>
+  {% else %}
   <p>{{ 'Exact saved API messages, in request order. Saved messages alone do not prove that the model received or completed the request.' if recorded else 'Reconstructed messages — the exact original request is unavailable.' }}</p>
   {% endif %}
+  {% endif %}
   {% if sys_note %}<p>{{ sys_note }}</p>{% endif %}
+  {% if message and message.provenance %}<p><a href="/sessions/{{ session.id }}/messages/{{ message.id }}/source">Inspect before-edit text and original provenance</a></p>{% endif %}
   <p>Model: <code>{{ active_job.model if active_job else message.model }}</code></p>
   {% with attachments=attachments | default([]) %}{% include "_attachments.html" %}{% endwith %}
   <p>Text and image parts are shown below in order. Images require a vision-capable model; PDF pages include both rendered images and extracted text. Model accuracy is not guaranteed. Full image base64 is available in the exact JSON details.</p>

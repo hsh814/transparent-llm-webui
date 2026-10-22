@@ -1,5 +1,16 @@
 # Browser QA inventory
 
+## Batch-edit forks
+
+- Verified 80 offline regressions and 74 repeatable browser checks with isolated databases and simulated model/search responses. Reviewed desktop and 320px editor screenshots in `test-results/browser-kMNSsv/`.
+- Backend coverage includes multiple user/assistant corrections, message and attachment exclusions, manual/carried provenance, actual historical Prompt preservation, rebuilt regeneration context, shared payload lifetime after source deletion, stale snapshots, active-source rejection, atomic Save & send, empty and assistant-ending forks, and Memo/Translation request boundaries.
+- Tool-history checks cover explicit selection after context changes, atomic multi-call batches, incomplete/orphan history rejection, retained failed results without retry, and exclusion of historical usage. An event fork through a retained call reproduced nine searches against an eight-call limit; replayed calls now count toward the limit, while reused results do not.
+- Browser workflows cover Cancel/Escape without altering the source or composer draft, editing both roles in one save, manual-response attribution, the original answer's exact Prompt, edited context in a subsequent request, explicit reuse of saved search results, Save & send without duplicate input, fresh-search permission, and disabled editing during generation.
+- Interactive Chromium smoke uploaded a PNG and a real two-page PDF, removed only the PNG in the editor, and used Save & send. The actual saved Prompt retained both PDF page images and extracted text, without the removed image or duplicate input.
+- A second tab changed the source while an editor draft was open. Saving returned 409, created no fork, and kept the correction in the dialog. The initial error appeared below the visible scroll area; error handling now brings it into view above the sticky actions. Confirmed visible errors and reachable controls at desktop and 320px; screenshots: `batch-editor-conflict-desktop.png` and `batch-editor-conflict-mobile.png`.
+- An offline save showed an inline connection error, preserved the open draft, and re-enabled Save. Expected conflict/offline failures were intentional; the repeatable browser run had no console or JavaScript errors. Editor drafts are not persisted across reloads.
+- The compact main composer remains unchanged. Testing used only isolated preview databases and servers; no live Ollama request or user-database mutation was performed.
+
 ## Model-driven search and event forks
 
 - Verified 67 offline regressions and 59 repeatable browser checks with isolated databases and simulated model/search responses. Browser artifacts: `test-results/browser-cMJ00n/`.

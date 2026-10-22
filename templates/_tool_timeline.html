@@ -4,6 +4,7 @@
   <div class="message-meta">
     <span class="role-label">{{ 'Legacy app search' if event.origin == 'legacy' else 'Assistant · tool request' if event.kind == 'assistant' else 'Tool · web search' }}</span>
     <span class="badge tool-status">{{ event.status }}</span>
+    {% if event.retained %}<span class="badge reused-history">Reused history · not rerun</span>{% endif %}
     {% if event.kind == 'assistant' %}<a class="btn-mini" target="_blank" rel="noopener" href="/sessions/{{ session.id }}/messages/{{ trace_job.user_message_id }}/events/{{ event_index }}/prompt?trace_id={{ trace_job.trace_id | urlencode }}">Prompt</a>{% endif %}
   </div>
   {% if event.origin == 'legacy' %}<p class="legacy-search-note">App-prepared search from earlier history — not requested by the LLM.</p>{% endif %}

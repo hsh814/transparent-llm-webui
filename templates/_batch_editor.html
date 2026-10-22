@@ -1,0 +1,46 @@
+<dialog id="batch-editor" class="batch-editor" aria-labelledby="batch-editor-title" data-focus-message="{{ focus_message or '' }}">
+  <form id="batch-editor-form" data-mode="{{ folder.type }}" hx-post="/sessions/{{ session.id }}/edit" hx-target="#folder-list" hx-swap="innerHTML" hx-sync="this:drop">
+    <header class="batch-editor-header">
+      <h2 id="batch-editor-title">Edit messages in a new fork</h2>
+      <p>The source conversation and its composer draft stay unchanged. Later messages are kept unless you exclude them. Nothing is sent until you choose Save &amp; send.</p>
+    </header>
+    <script type="application/json" id="batch-editor-snapshot">{{ snapshot | tojson }}</script>
+    <input type="hidden" name="draft" value="">
+    <div class="batch-editor-rows">
+    {% for row in editor_rows %}
+      {% if row.editor_kind == 'message' %}
+      <section class="batch-message-row" data-message-id="{{ row.id }}" data-position="{{ row.position }}" data-role="{{ row.role }}">
+        <div class="batch-row-heading"><label><input type="checkbox" class="batch-include-message" checked> Include {{ 'note' if row.role == 'memo' else row.role }} <span class="muted">#{{ loop.index }}</span></label><span class="batch-row-state" aria-live="polite">Unchanged</span></div>
+        <label class="sr-only" for="batch-content-{{ row.id }}">{{ row.role }} message text</label>
+        <textarea id="batch-content-{{ row.id }}" class="batch-content" rows="4">{{ row.content }}</textarea>
+        {% if row.provenance %}<p class="muted">Already {{ row.provenance.kind }} in the source; original provenance is preserved when unchanged.</p>{% endif %}
+        {% if row.attachments %}
+        <fieldset class="batch-attachments"><legend>Existing attachments — keep or remove</legend>
+          {% for attachment in row.attachments %}<label><input type="checkbox" class="batch-attachment" data-index="{{ attachment.index }}" checked> {{ attachment.name }} <span class="muted">{{ attachment.media_type }}{% if attachment.page_count %} · {{ attachment.page_count }} pages{% endif %}</span></label>{% endfor %}
+        </fieldset>
+        {% endif %}
+      </section>
+      {% else %}
+      <section class="batch-tool-row" data-tool-key="{{ row.key }}" data-position="{{ row.position }}" data-user-message-id="{{ row.user_message_id }}" data-complete="{{ 'true' if row.complete else 'false' }}">
+        <div class="batch-row-heading"><label><input type="checkbox" class="batch-include-tool" {% if row.complete %}checked{% else %}disabled{% endif %}> Reuse complete tool batch</label><span class="batch-tool-state" aria-live="polite"></span></div>
+        <p class="muted">Read-only historical calls and results, kept together. Reuse never reruns a search. After a context change, reuse requires your explicit choice.</p>
+        <details><summary>Inspect original tool history</summary>
+          {% for event in row.events %}
+          <div class="batch-tool-event"><strong>{{ event.kind }} · {{ event.status }}</strong>
+            {% if event.kind == 'assistant' %}<a class="btn-mini" target="_blank" rel="noopener" href="/sessions/{{ session.id }}/messages/{{ row.user_message_id }}/events/{{ event.event_index }}/prompt?trace_id={{ row.trace_id | urlencode }}">Original round Prompt</a>{% endif %}
+            <pre>{{ event | tojson(indent=2) }}</pre>
+          </div>
+          {% endfor %}
+        </details>
+      </section>
+      {% endif %}
+    {% endfor %}
+    </div>
+    <section class="batch-preview" aria-labelledby="batch-preview-title"><h3 id="batch-preview-title">Fork preview</h3><p id="batch-editor-summary" role="status" aria-live="polite"></p><ol id="batch-preview-list"></ol><p id="batch-send-note" class="muted"></p></section>
+    <p id="batch-editor-error" class="error-text" role="alert" hidden></p>
+    <footer class="batch-editor-actions">
+      {% if folder.type == 'chat' %}<label class="batch-search-permission"><input type="checkbox" name="web_search" value="true"> Allow fresh web search for Send <span class="muted">Off by default; reused results are not rerun.</span></label>{% endif %}
+      <div><button type="button" class="btn-mini batch-editor-cancel">Cancel</button><button type="submit" name="intent" value="save" class="btn">Save as fork</button><button type="submit" name="intent" value="send" id="batch-editor-send" class="btn" disabled>Save &amp; send</button></div>
+    </footer>
+  </form>
+</dialog>

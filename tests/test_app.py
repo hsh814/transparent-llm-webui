@@ -207,6 +207,365 @@ class AppTests(unittest.TestCase):
                 "SELECT COUNT(*), COALESCE(SUM(LENGTH(body)), 0) FROM payloads",
             ).fetchone())
 
+    def edit_draft(self, sid=None):
+        snapshot = db.edit_snapshot(self.sid if sid is None else sid)
+        draft = {
+            "revision": snapshot["revision"],
+            "messages": [{"id": message["id"], "include": True, "content": message["content"],
+                          "attachments": [attachment["index"] for attachment in message["attachments"]]}
+                         for message in snapshot["messages"]],
+            "tools": [{"key": group["key"], "include": group["complete"], "explicit": False}
+                      for group in snapshot["tool_groups"]],
+        }
+        return snapshot, draft
+
+    def test_batch_edit_preserves_source_and_uses_manual_answers_in_future_context(self):
+        self.send("Original question")
+        first = self.finish("Original answer", reasoning="Original reasoning", usage={"total_tokens": 7})
+        self.send("Original follow-up")
+        self.finish("Carried answer", usage={"total_tokens": 9})
+        original = db.conversation_snapshot(self.sid)
+        original_session = db.get_session(self.sid)
+        _, draft = self.edit_draft()
+        draft["messages"][0]["content"] = "Edited question"
+        draft["messages"][1]["content"] = "User-corrected answer"
+        draft["messages"][2]["content"] = "Edited follow-up"
+        fork = db.save_edited_fork(self.sid, draft)
+        self.assertEqual(db.conversation_snapshot(self.sid), original)
+        self.assertEqual(db.get_session(self.sid), original_session)
+        messages = db.visible_messages(fork["id"])
+        self.assertEqual([message["content"] for message in messages],
+                         ["Edited question", "User-corrected answer", "Edited follow-up", "Carried answer"])
+        self.assertEqual([message["provenance"]["kind"] for message in messages],
+                         ["edited", "manual", "edited", "carried"])
+        self.assertIsNone(messages[1]["reasoning"])
+        self.assertIsNone(messages[1]["total_tokens"])
+        self.assertEqual(messages[1]["provenance"]["source_reasoning"], "Original reasoning")
+        self.assertEqual(messages[1]["provenance"]["source_usage"]["total_tokens"], 7)
+        self.assertFalse(any(job["status"] in ("queued", "running") for job in db.list_generations(fork["id"])))
+        page = self.client.get(f'/sessions/{fork["id"]}/messages/{messages[1]["id"]}/prompt')
+        self.assertEqual(self.prompt_messages(page), first["messages"])
+        response = self.client.post(f'/sessions/{fork["id"]}/send', data={"content": "Continue this context"})
+        self.assertEqual(response.status_code, 200, response.text)
+        request = db.list_generations(fork["id"])[-1]
+        self.assertEqual([message["content"] for message in request["messages"][1:]],
+                         ["Edited question", "User-corrected answer", "Edited follow-up",
+                          "Carried answer", "Continue this context"])
+
+    def test_edited_regeneration_uses_new_base_without_rewriting_original_prompt(self):
+        self.send("Old input")
+        old = self.finish("Old answer")
+        db.update_session(self.sid, model="other-model", params_json='{"temperature":0.2}')
+        db.update_folder(self.folder["id"], "Current folder", "New system")
+        _, draft = self.edit_draft()
+        draft["messages"][0]["content"] = "New input"
+        draft["messages"][1]["content"] = "Manual answer"
+        fork = db.save_edited_fork(self.sid, draft)
+        user, manual = db.visible_messages(fork["id"])
+        self.assertEqual(db.get_message_generation(fork["id"], manual["id"])["messages"], old["messages"])
+        db.regenerate_response(fork["id"], manual["id"], web_search=False)
+        job = db.claim_generation(fork["id"])
+        self.assertEqual(job["model"], "other-model")
+        self.assertEqual(job["params"]["temperature"], 0.2)
+        self.assertEqual(job["messages"], [{"role": "system", "content": "New system"},
+                                            {"role": "user", "content": "New input"}])
+        db.finish_generation(job, "New generated answer", "", {"total_tokens": 3})
+        generated = db.visible_messages(fork["id"])[-1]
+        self.assertIsNone(generated["provenance"])
+        db.select_response_variant(fork["id"], user["id"], manual["id"])
+        self.assertEqual(db.visible_messages(fork["id"])[-1]["provenance"]["kind"], "manual")
+        self.assertEqual(db.get_message_generation(fork["id"], manual["id"])["messages"], old["messages"])
+        db.select_response_variant(fork["id"], user["id"], generated["id"])
+        self.assertEqual(db.get_message_generation(fork["id"], generated["id"])["messages"], job["messages"])
+
+    def test_save_and_send_keeps_selected_pdf_bytes_and_edited_context(self):
+        self.client.post(f"/sessions/{self.sid}/send", data={"content": "Read both"},
+                         files=[("files", ("figure.png", image_png(), "image/png")),
+                                ("files", ("paper.pdf", paper_pdf(), "application/pdf"))])
+        self.finish("Original analysis")
+        self.send("Original follow-up")
+        self.finish("Excluded answer")
+        source = db.visible_messages(self.sid)
+        original_pages = [page["data_url"] for page in source[0]["attachments"][1]["pages"]]
+        snapshot, draft = self.edit_draft()
+        self.assertNotIn("data:image/", json.dumps(snapshot))
+        draft["messages"][0]["attachments"] = [1]
+        draft["messages"][1]["content"] = "Corrected analysis"
+        draft["messages"][2]["content"] = "Use the corrected analysis"
+        draft["messages"][3]["include"] = False
+        response = self.client.post(f"/sessions/{self.sid}/edit",
+                                    data={"draft": json.dumps(draft), "intent": "send", "web_search": "false"})
+        self.assertEqual(response.status_code, 200, response.text)
+        fork_id = db._conn.execute("SELECT id FROM sessions WHERE id != ?", (self.sid,)).fetchone()[0]
+        pending = [job for job in db.list_generations(fork_id) if job["status"] == "queued"]
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0]["tools"], [])
+        parts = pending[0]["messages"][1]["content"]
+        self.assertEqual([part["image_url"]["url"] for part in parts if part["type"] == "image_url"], original_pages)
+        self.assertEqual([message["content"] for message in pending[0]["messages"][2:]],
+                         ["Corrected analysis", "Use the corrected analysis"])
+        self.assertEqual(db.visible_messages(self.sid), source)
+        with patch.object(ollama, "chat_stream", return_value=(chunk for chunk in [
+            {"type": "content", "text": "Answer using the edited context"},
+            {"type": "done", "usage": {"total_tokens": 4}},
+        ])):
+            generation._generate(db.claim_generation(fork_id))
+        answer = db.visible_messages(fork_id)[-1]
+        self.assertEqual(answer["content"], "Answer using the edited context")
+        self.assertEqual(db.get_message_generation(fork_id, answer["id"])["messages"], pending[0]["messages"])
+
+    def test_edited_send_requires_a_final_user_and_rejection_is_atomic(self):
+        self.send("Question")
+        self.finish("Answer")
+        _, draft = self.edit_draft()
+        before = (self.payload_stats(), db._conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0])
+        for empty in (False, True):
+            with self.subTest(empty=empty):
+                for message in draft["messages"]:
+                    message["include"] = not empty
+                response = self.client.post(f"/sessions/{self.sid}/edit",
+                                            data={"draft": json.dumps(draft), "intent": "send"})
+                self.assertIn(response.status_code, (400, 409, 422))
+                self.assertEqual((self.payload_stats(), db._conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]),
+                                 before)
+        empty_fork = db.save_edited_fork(self.sid, draft)
+        self.assertEqual(db.visible_messages(empty_fork["id"]), [])
+        self.assertEqual(db.list_generations(empty_fork["id"]), [])
+
+    def test_stale_edit_rejects_new_turn_version_and_settings_changes_without_writes(self):
+        for mutation in ("new turn", "selected version", "settings", "folder prompt"):
+            with self.subTest(mutation=mutation):
+                self.sid = db.create_session(self.folder["id"], model="test-model")["id"]
+                self.send("Question")
+                first = self.finish("First answer")
+                if mutation == "selected version":
+                    db.regenerate_response(self.sid, first["assistant_message_id"])
+                    self.finish("Second answer")
+                _, draft = self.edit_draft()
+                draft["messages"][0]["content"] = "Uncommitted edit"
+                if mutation == "new turn":
+                    self.send("Another tab's question")
+                    self.finish("Another tab's answer")
+                elif mutation == "selected version":
+                    db.select_response_variant(self.sid, first["user_message_id"], first["assistant_message_id"])
+                elif mutation == "settings":
+                    db.update_session(self.sid, model="other-model")
+                else:
+                    db.update_folder(self.folder["id"], "Changed", "Changed system prompt")
+                source = db.conversation_snapshot(self.sid)
+                before = (self.payload_stats(), db._conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0])
+                response = self.client.post(f"/sessions/{self.sid}/edit",
+                                            data={"draft": json.dumps(draft), "intent": "save"})
+                self.assertEqual(response.status_code, 409)
+                self.assertEqual(db.conversation_snapshot(self.sid), source)
+                self.assertEqual((self.payload_stats(), db._conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]),
+                                 before)
+
+    def test_editor_rejects_active_source_foreign_ids_and_attachment_indices(self):
+        self.client.post(f"/sessions/{self.sid}/send", data={"content": "Question"},
+                         files=[("files", ("figure.png", image_png(), "image/png"))])
+        self.finish("Answer")
+        _, draft = self.edit_draft()
+        before = self.payload_stats()
+        for field, value in (("id", 99999), ("attachments", [99]), ("attachments", [0, 0])):
+            bad = json.loads(json.dumps(draft))
+            bad["messages"][0][field] = value
+            with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                db.save_edited_fork(self.sid, bad)
+            self.assertEqual(self.payload_stats(), before)
+        self.send("Now running")
+        self.assertEqual(self.client.get(f"/sessions/{self.sid}/edit").status_code, 409)
+        after_send = self.payload_stats()
+        response = self.client.post(f"/sessions/{self.sid}/edit",
+                                    data={"draft": json.dumps(draft), "intent": "save"})
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(self.payload_stats(), after_send)
+
+    def test_edited_tool_history_requires_explicit_reuse_after_input_change(self):
+        self.client.post(f"/sessions/{self.sid}/send", data={"content": "Original research", "web_search": "true"})
+        results = [{"title": "Reference", "url": "https://example.org", "content": "Unique recorded evidence"}]
+        with patch.object(ollama, "chat_stream", side_effect=search_stream), \
+                patch.object(ollama, "web_search", return_value=results):
+            generation._generate(db.claim_generation(self.sid))
+        source = db.list_generations(self.sid)[0]
+        snapshot, draft = self.edit_draft()
+        self.assertEqual(len(snapshot["tool_groups"]), 1)
+        draft["messages"][0]["content"] = "Edited research"
+        before = self.payload_stats()
+        with self.assertRaises(ValueError):
+            db.save_edited_fork(self.sid, draft)
+        self.assertEqual(self.payload_stats(), before)
+        draft["tools"][0]["include"] = False
+        clean = db.save_edited_fork(self.sid, draft)
+        self.assertEqual(db.list_generations(clean["id"])[0]["trace"], [])
+        self.assertEqual(db.visible_messages(clean["id"])[-1]["provenance"]["kind"], "carried")
+        draft["tools"][0].update(include=True, explicit=True)
+        draft["messages"][1]["include"] = False
+        reused = db.save_edited_fork(self.sid, draft, send=True, web_search=False)
+        pending = db.list_generations(reused["id"])[0]
+        self.assertTrue(all(event["retained"] for event in pending["trace"]))
+        self.assertEqual(pending["messages"][1]["content"], "Edited research")
+        self.assertEqual(json.loads(pending["messages"][-1]["content"])["results"], results)
+        self.assertEqual([message["role"] for message in pending["messages"]],
+                         ["system", "user", "assistant", "tool"])
+        with patch.object(ollama, "web_search", side_effect=AssertionError("Included results must not rerun")), \
+                patch.object(ollama, "chat_stream", side_effect=search_stream):
+            generation._generate(db.claim_generation(reused["id"]))
+        self.assertEqual(db.visible_messages(reused["id"])[-1]["total_tokens"], 37)
+        self.assertEqual(db.get_generation(self.sid, source["user_message_id"])["trace"], source["trace"])
+        self.assertEqual(db._conn.execute(
+            "SELECT COUNT(*) FROM payloads WHERE instr(body, 'Unique recorded evidence') > 0").fetchone()[0], 1)
+
+    def test_forking_before_a_retained_result_counts_reexecuted_search_against_limit(self):
+        self.client.post(f"/sessions/{self.sid}/send", data={"content": "Research", "web_search": "true"})
+        with patch.object(ollama, "chat_stream", side_effect=search_stream), \
+                patch.object(ollama, "web_search", return_value=[]):
+            generation._generate(db.claim_generation(self.sid))
+        _, draft = self.edit_draft()
+        draft["messages"][-1]["include"] = False
+        edited = db.save_edited_fork(self.sid, draft)
+        imported = db.list_generations(edited["id"])[0]
+        call_fork = db.fork_session(edited["id"], imported["user_message_id"],
+                                    event_index=0, trace_id=imported["trace_id"])
+        user = db.visible_messages(call_fork["id"])[0]
+        db.request_response(call_fork["id"], user["id"], web_search=True)
+
+        def keep_searching(model, messages, params, *, tools=None):
+            index = sum(message["role"] == "tool" for message in messages)
+            yield {"type": "done", "finish_reason": "tool_calls",
+                   "tool_calls": [search_call(f"New query {index}", f"new-call-{index}")]}
+
+        with patch.object(ollama, "chat_stream", side_effect=keep_searching), \
+                patch.object(ollama, "web_search", return_value=[]) as search:
+            generation._generate(db.claim_generation(call_fork["id"]))
+            self.assertEqual(search.call_count, 8)
+        self.assertEqual(db.list_generations(call_fork["id"])[0]["status"], "failed")
+
+    def test_retained_failed_tool_result_is_context_not_a_new_search_attempt(self):
+        self.client.post(f"/sessions/{self.sid}/send", data={"content": "Original research", "web_search": "true"})
+        with patch.object(ollama, "chat_stream", side_effect=search_stream), \
+                patch.object(ollama, "web_search", side_effect=httpx.ConnectError("offline")):
+            generation._generate(db.claim_generation(self.sid))
+        snapshot, draft = self.edit_draft()
+        self.assertTrue(snapshot["tool_groups"][0]["complete"])
+        draft["messages"][0]["content"] = "Explain the recorded failure without searching"
+        draft["tools"][0]["explicit"] = True
+        fork = db.save_edited_fork(self.sid, draft, send=True, web_search=False)
+        pending = db.list_generations(fork["id"])[0]
+        self.assertEqual(pending["trace"][-1]["status"], "failed")
+        self.assertIn("error", json.loads(pending["messages"][-1]["content"]))
+        with patch.object(ollama, "web_search", side_effect=AssertionError("Never retry an imported error")), \
+                patch.object(ollama, "chat_stream", side_effect=search_stream):
+            generation._generate(db.claim_generation(fork["id"]))
+        finished = db.list_generations(fork["id"])[0]
+        self.assertEqual(finished["status"], "completed")
+        self.assertEqual(finished["trace"][-1]["status"], "failed")
+        self.assertEqual(db.visible_messages(fork["id"])[-1]["total_tokens"], 37)
+
+    def test_editor_excludes_incomplete_tool_batches_and_rejects_orphan_history(self):
+        self.client.post(f"/sessions/{self.sid}/send", data={"content": "Compare", "web_search": "true"})
+        job = db.claim_generation(self.sid)
+        calls = [search_call("one", "call-one"), search_call("two", "call-two")]
+        db.record_tool_calls(job, {"role": "assistant", "content": "", "tool_calls": calls}, "", None)
+        for call in calls:
+            db.start_tool(job, call["id"])
+            db.finish_tool(job, call["id"], {"query": json.loads(call["function"]["arguments"])["query"],
+                                            "max_results": 2, "results": [], "fetched_at": "2026-10-22"})
+        db.finish_generation(job, "Comparison", "", None)
+        complete = db.list_generations(self.sid)[0]
+        incomplete = db.fork_session(self.sid, job["user_message_id"], event_index=1, trace_id=complete["trace_id"])
+        snapshot, draft = self.edit_draft(incomplete["id"])
+        self.assertFalse(snapshot["tool_groups"][0]["complete"])
+        draft["tools"][0].update(include=True, explicit=True)
+        before = self.payload_stats()
+        with self.assertRaises(ValueError):
+            db.save_edited_fork(incomplete["id"], draft)
+        self.assertEqual(self.payload_stats(), before)
+        draft["tools"][0]["include"] = False
+        clean = db.save_edited_fork(incomplete["id"], draft)
+        self.assertEqual(db.list_generations(clean["id"])[0]["trace"], [])
+        _, orphan = self.edit_draft()
+        orphan["messages"][0]["include"] = False
+        orphan["tools"][0]["explicit"] = True
+        with self.assertRaises(ValueError):
+            db.save_edited_fork(self.sid, orphan)
+
+    def test_standalone_edited_assistant_keeps_origin_without_false_user_linkage(self):
+        self.send("Earlier user")
+        self.finish("Earlier answer")
+        self.send("Excluded user")
+        origin = self.finish("Original second answer")
+        _, draft = self.edit_draft()
+        draft["messages"][2]["include"] = False
+        draft["messages"][3]["content"] = "Standalone corrected answer"
+        fork = db.save_edited_fork(self.sid, draft)
+        rows = db.visible_messages(fork["id"])
+        self.assertEqual([row["role"] for row in rows], ["user", "assistant", "assistant"])
+        self.assertEqual(rows[-1]["provenance"]["kind"], "manual")
+        before = db.conversation_snapshot(fork["id"])
+        response = self.client.post(f'/sessions/{fork["id"]}/messages/{rows[-1]["id"]}/regenerate')
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(db.conversation_snapshot(fork["id"]), before)
+        db.delete_session(self.sid)
+        prompt = self.client.get(f'/sessions/{fork["id"]}/messages/{rows[-1]["id"]}/prompt')
+        self.assertEqual(self.prompt_messages(prompt), origin["messages"])
+        self.client.post(f'/sessions/{fork["id"]}/send', data={"content": "Continue"})
+        request = db.list_generations(fork["id"])[-1]
+        self.assertEqual([message["content"] for message in request["messages"][1:]],
+                         ["Earlier user", "Earlier answer", "Standalone corrected answer", "Continue"])
+
+    def test_edited_provenance_and_files_survive_source_deletion_then_collect(self):
+        self.client.post(f"/sessions/{self.sid}/send", data={"content": "Inspect"},
+                         files=[("files", ("figure.png", image_png(), "image/png"))])
+        origin = self.finish("Source answer", usage={"total_tokens": 8})
+        source_user = db.visible_messages(self.sid)[0]
+        _, draft = self.edit_draft()
+        draft["messages"][1]["content"] = "Corrected answer"
+        fork = db.save_edited_fork(self.sid, draft)
+        user, assistant = db.visible_messages(fork["id"])
+        self.assertEqual(user["attachments_id"], source_user["attachments_id"])
+        self.assertEqual(db._conn.execute(
+            """SELECT COUNT(*) FROM payloads WHERE kind = 'scalar' AND body LIKE '"data:image/%'"""
+        ).fetchone()[0], 1)
+        db.delete_session(self.sid)
+        prompt = self.client.get(f'/sessions/{fork["id"]}/messages/{assistant["id"]}/prompt')
+        self.assertEqual(self.prompt_messages(prompt), origin["messages"])
+        copied = db.fork_session(fork["id"], assistant["id"])
+        copied_assistant = db.visible_messages(copied["id"])[-1]
+        self.assertEqual(copied_assistant["provenance_id"], assistant["provenance_id"])
+        db.delete_session(fork["id"])
+        prompt = self.client.get(f'/sessions/{copied["id"]}/messages/{copied_assistant["id"]}/prompt')
+        self.assertEqual(self.prompt_messages(prompt), origin["messages"])
+        db.delete_session(copied["id"])
+        self.assertEqual(self.payload_stats(), (0, 0))
+        self.assertEqual(db._conn.execute("PRAGMA foreign_key_check").fetchall(), [])
+
+    def test_batch_edit_memo_and_translation_respect_model_boundaries(self):
+        db.set_folder_type(self.folder["id"], "memo")
+        note = db.add_message(self.sid, "memo", "Original note")
+        _, draft = self.edit_draft()
+        draft["messages"][0]["content"] = "Edited note"
+        with self.assertRaises(ValueError):
+            db.save_edited_fork(self.sid, draft, send=True)
+        fork = db.save_edited_fork(self.sid, draft)
+        self.assertEqual(db.visible_messages(fork["id"])[0]["content"], "Edited note")
+        self.assertEqual(db.list_generations(fork["id"]), [])
+        self.assertEqual(db.visible_messages(self.sid)[0]["content"], note["content"])
+        folder = db.create_folder("Translate", "Translate exactly", "translation", 100)
+        sid = db.create_session(folder["id"], model="test-model")["id"]
+        db.enqueue_turns(sid, ["First chunk", "Second chunk"])
+        for text in ("First translation", "Second translation"):
+            job = db.claim_generation(sid)
+            db.finish_generation(job, text, "", None)
+        _, draft = self.edit_draft(sid)
+        draft["messages"][0]["content"] = "Edited first chunk"
+        draft["messages"][2]["content"] = "Edited second chunk"
+        draft["messages"][3]["include"] = False
+        edited = db.save_edited_fork(sid, draft, send=True)
+        pending = db.list_generations(edited["id"])[-1]
+        self.assertEqual(pending["messages"], [{"role": "system", "content": "Translate exactly"},
+                                                {"role": "user", "content": "Edited second chunk"}])
+
     def test_tool_events_stream_before_the_final_model_output(self):
         self.client.post(f"/sessions/{self.sid}/send", data={"content": "Find a paper", "web_search": "true"})
         job = db.claim_generation(self.sid)

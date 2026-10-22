@@ -88,6 +88,8 @@ try {
   await page.locator('.composer textarea').fill(firstInput);
   await page.locator('.composer textarea').press('Enter');
   await page.locator('.streaming .content span').waitFor();
+  check('batch editing is unavailable while the source response is running',
+    !await page.getByRole('button', { name: 'Edit messages', exact: true }).isEnabled());
   await settle(page);
   const sentAt = await page.locator('.session-item.active time').getAttribute('datetime');
   check('first message becomes a normalized truncated title', await page.getByLabel('Chat title', { exact: true }).inputValue() === automaticTitle);
@@ -331,6 +333,111 @@ try {
   await mobilePage.goto(page.url());
   check('tool history fits a 320px viewport', await fit(mobilePage));
   await mobilePage.screenshot({ path: path.join(artifacts, 'mobile-tool-history.png'), scale: 'css' });
+  const editSourceURL = page.url();
+  const editSourceId = await page.locator('#active-session').inputValue();
+  const editSourceText = await page.locator('.message[data-message-role="user"] .content').textContent();
+  const editPrompt = await context.newPage();
+  await editPrompt.goto(base + await page.locator('.message[data-message-role="assistant"] a[href$="/prompt"]').getAttribute('href'));
+  const originalEditRequest = JSON.parse(await editPrompt.locator('#prompt-messages').textContent());
+  await page.locator('.composer textarea').fill('Unsent source draft');
+  const sessionsBeforeEdit = await page.locator('.session-item').count();
+  await page.getByRole('button', { name: 'Edit messages', exact: true }).click();
+  await page.locator('#batch-editor[open]').waitFor();
+  await page.locator('.batch-message-row[data-role="user"] .batch-content').fill('[no-search] Edited research question');
+  check('editing input defaults later tool history to excluded',
+    !await page.locator('.batch-include-tool').isChecked()
+    && await page.locator('.batch-message-row[data-role="assistant"] .batch-include-message').isChecked());
+  check('assistant-ending editor cannot implicitly send', !await page.locator('#batch-editor-send').isEnabled());
+  await page.keyboard.press('Escape');
+  await page.locator('#batch-editor').waitFor({ state: 'detached' });
+  check('cancelling batch edits preserves source and unsent draft without a fork',
+    page.url() === editSourceURL && await page.locator('.session-item').count() === sessionsBeforeEdit
+    && await page.locator('.composer textarea').inputValue() === 'Unsent source draft'
+    && await page.locator('.message[data-message-role="user"] .content').textContent() === editSourceText);
+  await page.getByRole('button', { name: 'Edit messages', exact: true }).click();
+  await page.locator('#batch-editor[open]').waitFor();
+  await page.locator('.batch-message-row[data-role="user"] .batch-content').fill('[no-search] Edited research question');
+  await page.locator('.batch-message-row[data-role="assistant"] .batch-content').fill('Human-corrected response.');
+  await page.screenshot({ path: path.join(artifacts, 'batch-editor-desktop.png'), scale: 'css' });
+  await page.locator('#batch-editor button[name="intent"][value="save"]').click();
+  await settle(page);
+  await page.locator('#batch-editor').waitFor({ state: 'detached' });
+  const manualForkURL = page.url();
+  check('batch save creates one idle fork with both text edits',
+    await page.locator('#active-session').inputValue() !== editSourceId
+    && await page.locator('.message[data-message-role="user"] .content').textContent() === '[no-search] Edited research question'
+    && await page.locator('.message[data-message-role="assistant"] .content').textContent() === 'Human-corrected response.'
+    && await page.locator('[data-generation-status="queued"], [data-generation-status="running"]').count() === 0
+    && await page.locator('.tool-event').count() === 0);
+  check('manual answer exposes provenance without fabricated token or reasoning attribution',
+    await page.locator('.message[data-message-role="assistant"] .provenance-badge').isVisible()
+    && await page.locator('.message[data-message-role="assistant"] .badge-usage').count() === 0
+    && await page.locator('.message[data-message-role="assistant"] .reasoning').count() === 0);
+  await editPrompt.goto(base + await page.locator('.message[data-message-role="assistant"] a[href$="/prompt"]').getAttribute('href'));
+  check('manual answer keeps its actual historical Prompt',
+    JSON.stringify(JSON.parse(await editPrompt.locator('#prompt-messages').textContent())) === JSON.stringify(originalEditRequest));
+  await page.locator('.composer textarea').fill('[instant] Continue edited history');
+  await page.locator('.composer textarea').press('Enter');
+  await finished(page);
+  await editPrompt.goto(base + await page.locator('.message[data-message-role="assistant"] a[href$="/prompt"]').last().getAttribute('href'));
+  const editedFollowup = JSON.parse(await editPrompt.locator('#prompt-messages').textContent()).filter(message => message.role !== 'system');
+  check('next request uses edited assistant context rather than the original answer',
+    JSON.stringify(editedFollowup.map(message => [message.role, message.content])) === JSON.stringify([
+      ['user', '[no-search] Edited research question'],
+      ['assistant', 'Human-corrected response.'],
+      ['user', '[instant] Continue edited history'],
+    ]));
+  await page.goto(editSourceURL);
+  check('source input and composer draft survive saving and using the fork',
+    await page.locator('.message[data-message-role="user"] .content').textContent() === editSourceText
+    && await page.locator('.composer textarea').inputValue() === 'Unsent source draft'
+    && await page.locator('.tool-result').count() === 2);
+  await page.getByRole('button', { name: 'Edit messages', exact: true }).click();
+  await page.locator('#batch-editor[open]').waitFor();
+  await page.locator('.batch-message-row[data-role="user"] .batch-content').fill('[no-search] Explicitly reuse these sources');
+  await page.locator('.batch-include-tool').check();
+  await page.locator('.batch-message-row[data-role="assistant"] .batch-include-message').uncheck();
+  check('excluding the final answer enables an explicit send without fresh search',
+    await page.locator('#batch-editor-send').isEnabled()
+    && !await page.locator('#batch-editor-form [name="web_search"]').isChecked());
+  await page.locator('#batch-editor-send').click();
+  await finished(page);
+  check('Save and send reuses complete selected tool history without duplicating results',
+    await page.locator('.tool-result').count() === 2 && await page.locator('.reused-history').count() === 3
+    && await page.locator('.message[data-message-role="assistant"]').count() === 1
+    && !await page.locator('.composer [name="web_search"]').isChecked());
+  await editPrompt.goto(base + await page.locator('.message[data-message-role="assistant"] a[href$="/prompt"]').getAttribute('href'));
+  const reusedRequest = JSON.parse(await editPrompt.locator('#prompt-messages').textContent());
+  check('included tool results retain their exact saved retrieval snapshots',
+    JSON.stringify(reusedRequest.filter(message => message.role === 'tool')) ===
+    JSON.stringify(originalEditRequest.filter(message => message.role === 'tool'))
+    && reusedRequest.find(message => message.role === 'user').content === '[no-search] Explicitly reuse these sources');
+  await page.goto(manualForkURL);
+  await page.getByRole('button', { name: 'Edit messages', exact: true }).click();
+  await page.locator('#batch-editor[open]').waitFor();
+  await page.locator('.batch-message-row[data-role="assistant"] .batch-include-message').last().uncheck();
+  await page.locator('#batch-editor-form [name="web_search"]').check();
+  await page.locator('#batch-editor-send').click();
+  await page.locator('.tool-result[data-event-status="running"]').waitFor();
+  check('explicit editor search permission stays visible while the new fork searches',
+    await page.locator('.composer [name="web_search"]').isChecked());
+  await finished(page);
+  await editPrompt.close();
+  await mobilePage.goto(page.url());
+  await mobilePage.getByRole('button', { name: 'Edit messages', exact: true }).tap();
+  await mobilePage.locator('#batch-editor[open]').waitFor();
+  const editorFits = await mobilePage.evaluate(() => {
+    const dialog = document.querySelector('#batch-editor').getBoundingClientRect();
+    const actions = [...document.querySelectorAll('.batch-editor-actions button')].map(button => button.getBoundingClientRect());
+    return document.documentElement.scrollWidth <= innerWidth && dialog.left >= 0 && dialog.right <= innerWidth
+      && dialog.top >= 0 && dialog.bottom <= innerHeight && actions.every(rect =>
+        rect.left >= 0 && rect.right <= innerWidth && rect.top >= 0 && rect.bottom <= innerHeight);
+  });
+  check('batch editor and sticky save/cancel actions fit at 320px', editorFits);
+  await mobilePage.screenshot({ path: path.join(artifacts, 'batch-editor-mobile.png'), scale: 'css' });
+  await mobilePage.locator('.batch-editor-cancel').tap();
+  check('closing the editor restores the compact mobile composer',
+    await mobilePage.locator('#batch-editor').count() === 0 && await fit(mobilePage));
   check('no browser console or JavaScript errors', errors.length === 0);
   console.log(`\n${checks.length} browser checks passed. Screenshots: ${artifacts}`);
 } finally {

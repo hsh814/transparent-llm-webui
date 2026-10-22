@@ -27,21 +27,25 @@ def allowed_tools(web_search: bool) -> list[dict]:
 
 
 def api_messages(trace: list[dict], *, include_failed: bool = False) -> list[dict]:
-    """Retry only unresolved calls; closed prior turns also retain their error replies."""
+    """Retained errors are context; new failed calls remain unresolved for retry."""
     return [event["message"] for event in trace
-            if (event["status"] == "completed" or include_failed and event["status"] == "failed")
+            if (event["status"] == "completed"
+                or event["status"] == "failed" and (include_failed or event.get("retained")))
             and event.get("message") is not None]
 
 
 def pending_calls(trace: list[dict]) -> list[dict]:
     completed = {event["message"]["tool_call_id"] for event in trace
-                 if event["kind"] == "tool" and event["status"] == "completed"}
+                 if event["kind"] == "tool" and event.get("message") is not None
+                 and (event["status"] == "completed"
+                      or event["status"] == "failed" and event.get("retained"))}
     return [call for event in trace if event["kind"] == "assistant"
             for call in event["message"].get("tool_calls", []) if call["id"] not in completed]
 
 
 def total_usage(trace: list[dict], final_usage: dict | None) -> dict | None:
-    rounds = [event.get("usage") for event in trace if event["kind"] == "assistant"]
+    rounds = [event.get("usage") for event in trace
+              if event["kind"] == "assistant" and not event.get("retained")]
     rounds.append(final_usage)
     total = {}
     for usage in rounds:

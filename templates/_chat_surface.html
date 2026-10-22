@@ -10,12 +10,15 @@
       <input type="text" name="title" value="{{ session.title }}" class="title-input" aria-label="Chat title" maxlength="200" title="Rename this chat, or clear to use the first message automatically">
     </form>
   </div>
+  <button class="btn-mini open-batch-editor" type="button"
+          hx-get="/sessions/{{ session.id }}/edit" hx-target="#batch-editor-host" hx-swap="innerHTML">Edit messages</button>
   <button class="btn-mini" type="button" id="copy-all-btn">Copy chat</button>
   {% if folder.type != 'memo' %}
   {% set ctx = chat_context(session) %}
   {% with models=ctx.models, usage=ctx.usage, ctx_cap=ctx.ctx_cap %}{% include "_model_selector.html" %}{% endwith %}
   {% endif %}
 </header>
+<div id="batch-editor-host"></div>
 {% if folder.type != 'memo' %}
 <div class="context-bar">
   {% include "_system_prompt.html" %}
@@ -33,7 +36,7 @@
 </div>
 <div class="composer-wrap">
   <button class="btn-mini jump-latest" type="button" hidden>↓ Latest message</button>
-  <form class="composer" data-session-id="{{ session.id }}" data-mode="{{ folder.type }}"
+  <form class="composer" data-session-id="{{ session.id }}" data-mode="{{ folder.type }}"{% if editor_web_search is defined and editor_web_search is not none %} data-editor-web-search="{{ 'true' if editor_web_search else 'false' }}"{% endif %}
         hx-post="/sessions/{{ session.id }}/{{ 'memo' if folder.type == 'memo' else 'send' }}"
         hx-target="#message-list" hx-swap="beforeend" hx-disabled-elt="find button[type=submit]" hx-sync="this:drop"
         enctype="{{ 'multipart/form-data' if folder.type == 'chat' else 'application/x-www-form-urlencoded' }}" hx-encoding="{{ 'multipart/form-data' if folder.type == 'chat' else 'application/x-www-form-urlencoded' }}">

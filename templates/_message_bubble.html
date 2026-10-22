@@ -2,6 +2,9 @@
 <div class="message {{ message.role }}" id="message-{{ message.id }}" data-message-role="{{ message.role }}" data-terminal="{{ 'true' if ui.is_last else 'false' }}">
   <div class="message-meta">
     <span class="role-label">{{ 'You' if message.role == 'user' else 'Note' if message.role == 'memo' else message.role }}</span>
+    {% if message.provenance %}
+    <a class="badge provenance-badge" target="_blank" rel="noopener" href="/sessions/{{ session.id }}/messages/{{ message.id }}/source">{{ 'User edited response' if message.provenance.kind == 'manual' else 'Carried from earlier context' if message.provenance.kind == 'carried' else 'Edited input' }}</a>
+    {% endif %}
     {% if message.model %}
     <span class="badge">{{ message.model }}{% if message.reasoning_effort %} · effort: {{ message.reasoning_effort }}{% endif %}</span>
     {% endif %}
@@ -35,6 +38,9 @@
   {% endif %}
   {% if message.role != 'system' %}
   <div class="message-actions" aria-label="Message actions">
+    <button class="btn-mini open-batch-editor" type="button"
+            hx-get="/sessions/{{ session.id }}/edit?focus={{ message.id }}"
+            hx-target="#batch-editor-host" hx-swap="innerHTML">Edit</button>
     <button class="btn-mini fork-message" type="button" aria-label="Fork conversation through this message" title="Create an independent conversation through this message"
             data-message-mutation {% if ui.active %}disabled{% endif %}
             hx-post="/sessions/{{ session.id }}/messages/{{ message.id }}/fork"
@@ -48,7 +54,7 @@
     {% elif ui.can_regenerate %}
     <button class="btn-mini regenerate-response" type="button" data-message-mutation data-terminal-action
             {% if not ui.is_last %}hidden{% endif %} {% if ui.active %}disabled{% endif %}
-            title="Generate another response from the saved original input and settings with the current search permission; keep this version"
+            title="Generate another response from this fork's saved input and settings with the current search permission; keep this version"
             hx-post="/sessions/{{ session.id }}/messages/{{ message.id }}/regenerate"
             hx-target="#message-list" hx-swap="innerHTML" hx-sync="#message-list:drop">Regenerate</button>
     {% endif %}

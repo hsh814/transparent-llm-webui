@@ -44,10 +44,8 @@
       <label class="attachment-picker btn-mini">Attach images or PDF
         <input class="attachment-input" type="file" name="files" accept="image/png,image/jpeg,image/webp,application/pdf,.png,.jpg,.jpeg,.webp,.pdf" multiple aria-label="Attach images or PDF">
       </label>
-      <label class="search-opt-in"><input type="checkbox" name="web_search" value="true"> Web search</label>
-      <label class="search-query" hidden>Search query override (optional)
-        <input type="text" name="search_query" placeholder="Uses your message when blank" disabled>
-      </label>
+      <label class="search-opt-in"><input type="checkbox" name="web_search" value="true"> Allow web search</label>
+      <p class="muted search-permission-note">The model may request searches when allowed. Queries and sources appear inline.</p>
       <ul class="attachment-drafts" aria-label="Unsubmitted attachments" hidden></ul>
       <p class="file-draft-note" hidden>Unsubmitted files stay in memory across chats; reloading loses them.</p>
     </div>

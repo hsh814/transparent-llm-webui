@@ -1,4 +1,5 @@
-<div class="message {{ message.role }}" id="message-{{ message.id }}">
+{% set ui = message.ui if message.ui is defined else message_controls(session, message) %}
+<div class="message {{ message.role }}" id="message-{{ message.id }}" data-message-role="{{ message.role }}" data-terminal="{{ 'true' if ui.is_last else 'false' }}">
   <div class="message-meta">
     <span class="role-label">{{ 'You' if message.role == 'user' else 'Note' if message.role == 'memo' else message.role }}</span>
     {% if message.model %}
@@ -7,12 +8,11 @@
     {% if message.total_tokens is not none %}
     <span class="badge badge-usage" title="prompt {{ message.prompt_tokens }} · completion {{ message.completion_tokens }} · total {{ message.total_tokens }}">↑{{ message.prompt_tokens if message.prompt_tokens is not none else 0 }} ↓{{ message.completion_tokens if message.completion_tokens is not none else 0 }}</span>
     {% endif %}
-    {% set is_last = is_last | default(True) %}
-    {% if message.role != 'system' and is_last %}
-    <button class="btn-mini delete-message" aria-label="Delete latest message"
+    {% if message.role != 'system' %}
+    <button class="btn-mini delete-message" type="button" aria-label="Delete latest message"
+            data-message-mutation data-terminal-action {% if not ui.is_last %}hidden{% endif %} {% if ui.active %}disabled{% endif %}
             hx-post="/sessions/{{ session.id }}/messages/{{ message.id }}/delete"
-            hx-target="#message-list"
-            hx-swap="innerHTML"
+            hx-target="#message-list" hx-swap="innerHTML" hx-sync="#message-list:drop"
             hx-confirm="Delete this message?">×</button>
     {% endif %}
     {% if message.role in ('user', 'assistant') %}
@@ -31,8 +31,46 @@
   {% endif %}
   <div class="content">{{ message.content }}</div>
   {% if message.role == 'user' %}
-  {% with attachments=message.attachments_json | default('[]') | from_json %}{% include "_attachments.html" %}{% endwith %}
-  {% elif job | default(None) %}
-  {% with search=job.search_json | default(None) | from_json %}{% include "_search.html" %}{% endwith %}
+  {% with attachments=message.attachments %}{% include "_attachments.html" %}{% endwith %}
+  {% endif %}
+  {% if message.role != 'system' %}
+  <div class="message-actions" aria-label="Message actions">
+    <button class="btn-mini fork-message" type="button" aria-label="Fork conversation through this message" title="Create an independent conversation through this message"
+            data-message-mutation {% if ui.active %}disabled{% endif %}
+            hx-post="/sessions/{{ session.id }}/messages/{{ message.id }}/fork"
+            hx-target="#folder-list" hx-swap="innerHTML" hx-sync="#message-list:drop">Fork</button>
+    {% if ui.can_respond and not ui.has_trace %}
+    <button class="btn-mini request-response" type="button" data-message-mutation data-terminal-action
+            {% if not ui.is_last or ui.active %}hidden{% endif %} {% if ui.active %}disabled{% endif %}
+            title="Request a response using this message's saved input and settings when available"
+            hx-post="/sessions/{{ session.id }}/messages/{{ message.id }}/respond"
+            hx-target="#message-list" hx-swap="innerHTML" hx-sync="#message-list:drop">Request response</button>
+    {% elif ui.can_regenerate %}
+    <button class="btn-mini regenerate-response" type="button" data-message-mutation data-terminal-action
+            {% if not ui.is_last %}hidden{% endif %} {% if ui.active %}disabled{% endif %}
+            title="Generate another response from the saved original input and settings with the current search permission; keep this version"
+            hx-post="/sessions/{{ session.id }}/messages/{{ message.id }}/regenerate"
+            hx-target="#message-list" hx-swap="innerHTML" hx-sync="#message-list:drop">Regenerate</button>
+    {% endif %}
+    {% set variants = ui.variants %}
+    {% if variants and variants.count %}
+    <div class="response-variants" aria-label="Response versions" data-can-switch="{{ 'true' if variants.can_switch else 'false' }}">
+      <button class="btn-mini variant-previous" type="button" aria-label="Previous response"
+              title="{{ 'Previous response' if ui.is_last else 'Fork to change this response' }}"
+              data-message-mutation data-variant-action data-unavailable="{{ 'true' if variants.index <= 1 else 'false' }}"
+              {% if not variants.can_switch or variants.index <= 1 %}disabled{% endif %}
+              {% if variants.index > 1 %}hx-post="/sessions/{{ session.id }}/messages/{{ message.user_message_id }}/variants/{{ variants.ids[variants.index - 2] }}/select"{% endif %}
+              hx-target="#message-list" hx-swap="innerHTML" hx-sync="#message-list:drop"><span aria-hidden="true">←</span></button>
+      <span class="variant-position" aria-label="Response {{ variants.index }} of {{ variants.count }}">{{ variants.index }}/{{ variants.count }}</span>
+      <button class="btn-mini variant-next" type="button" aria-label="Next response"
+              title="{{ 'Next response' if ui.is_last else 'Fork to change this response' }}"
+              data-message-mutation data-variant-action data-unavailable="{{ 'true' if variants.index >= variants.count else 'false' }}"
+              {% if not variants.can_switch or variants.index >= variants.count %}disabled{% endif %}
+              {% if variants.index < variants.count %}hx-post="/sessions/{{ session.id }}/messages/{{ message.user_message_id }}/variants/{{ variants.ids[variants.index] }}/select"{% endif %}
+              hx-target="#message-list" hx-swap="innerHTML" hx-sync="#message-list:drop"><span aria-hidden="true">→</span></button>
+      <span class="variant-lock" {% if ui.is_last %}hidden{% endif %}>Fork to change this response</span>
+    </div>
+    {% endif %}
+  </div>
   {% endif %}
 </div>

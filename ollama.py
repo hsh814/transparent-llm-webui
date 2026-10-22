@@ -111,7 +111,13 @@ def web_search(query: str, max_results: int = 5) -> list[dict]:
     return results
 
 
-def _build_payload(model: str, messages: list[dict], params: dict) -> dict:
+class ToolCallError(ValueError):
+    """A safe, user-visible rejection of an incomplete or invalid tool request."""
+
+
+def _build_payload(
+    model: str, messages: list[dict], params: dict, *, tools: list[dict] | None = None
+) -> dict:
     payload: dict = {
         "model": model,
         "messages": messages,
@@ -120,19 +126,21 @@ def _build_payload(model: str, messages: list[dict], params: dict) -> dict:
     for key in ("reasoning_effort", "temperature", "top_p", "max_tokens", "seed"):
         if params.get(key) is not None:
             payload[key] = params[key]
+    if tools:
+        payload["tools"] = tools
     return payload
 
 
-def chat_stream(model: str, messages: list[dict], params: dict) -> Iterator[dict]:
-    """Stream chat completions.
-
-    Yields {"type": "reasoning"|"content"|"done", "text": ...} per chunk;
-    the final "done" chunk also carries "usage" (dict or None).
-    """
-    payload = _build_payload(model, messages, params)
+def chat_stream(
+    model: str, messages: list[dict], params: dict, *, tools: list[dict] | None = None
+) -> Iterator[dict]:
+    """Stream text/reasoning and return complete, validated calls on the done chunk."""
+    payload = _build_payload(model, messages, params, tools=tools)
     payload["stream_options"] = {"include_usage": True}
     usage: dict | None = None
     finished = False
+    finish_reason = None
+    calls: dict[int, dict] = {}
     with _client() as client:
         with client.stream("POST", "/chat/completions", json=payload) as resp:
             resp.raise_for_status()
@@ -147,6 +155,8 @@ def chat_stream(model: str, messages: list[dict], params: dict) -> Iterator[dict
                     chunk = json.loads(data)
                 except json.JSONDecodeError as exc:
                     raise RuntimeError("Invalid response from Ollama") from exc
+                if not isinstance(chunk, dict):
+                    raise RuntimeError("Invalid response from Ollama")
                 if chunk.get("error"):
                     raise RuntimeError("Ollama reported a generation error")
                 if chunk.get("usage"):
@@ -154,9 +164,40 @@ def chat_stream(model: str, messages: list[dict], params: dict) -> Iterator[dict
                 choices = chunk.get("choices") or []
                 if not choices:
                     continue
-                delta = choices[0].get("delta") or {}
-                finish = choices[0].get("finish_reason")
+                choice = choices[0]
+                delta = choice.get("delta") or {}
+                finish = choice.get("finish_reason")
+                fragments = delta.get("tool_calls")
+                if fragments is not None:
+                    if not isinstance(fragments, list) or finish_reason is not None:
+                        raise ToolCallError("Ollama returned malformed tool calls. Retry the response.")
+                    for fragment in fragments:
+                        if not isinstance(fragment, dict):
+                            raise ToolCallError("Ollama returned malformed tool calls. Retry the response.")
+                        index = fragment.get("index")
+                        if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+                            raise ToolCallError("Ollama returned a tool call without a valid index. Retry the response.")
+                        call = calls.setdefault(index, {
+                            "id": "", "type": "function", "function": {"name": "", "arguments": ""}
+                        })
+                        if fragment.get("type") not in (None, "function"):
+                            raise ToolCallError("Ollama returned an unsupported tool call type.")
+                        call_id = fragment.get("id")
+                        if call_id is not None:
+                            if not isinstance(call_id, str):
+                                raise ToolCallError("Ollama returned malformed tool calls. Retry the response.")
+                            call["id"] += call_id
+                        function = fragment.get("function") or {}
+                        if not isinstance(function, dict):
+                            raise ToolCallError("Ollama returned malformed tool calls. Retry the response.")
+                        for key in ("name", "arguments"):
+                            value = function.get(key)
+                            if value is not None:
+                                if not isinstance(value, str):
+                                    raise ToolCallError("Ollama returned malformed tool calls. Retry the response.")
+                                call["function"][key] += value
                 if finish is not None:
+                    finish_reason = finish
                     finished = True
                 if delta.get("reasoning") or delta.get("reasoning_content"):
                     yield {"type": "reasoning", "text": delta.get("reasoning") or delta["reasoning_content"]}
@@ -164,7 +205,24 @@ def chat_stream(model: str, messages: list[dict], params: dict) -> Iterator[dict
                     yield {"type": "content", "text": delta["content"]}
             if not finished:
                 raise RuntimeError("Ollama disconnected before completing the response")
-            yield {"type": "done", "text": "", "usage": usage}
+            tool_calls = [calls[index] for index in sorted(calls)]
+            if tool_calls or finish_reason == "tool_calls":
+                if (not tool_calls or finish_reason != "tool_calls"
+                        or sorted(calls) != list(range(len(calls)))):
+                    raise ToolCallError("Ollama returned incomplete tool calls. Retry the response.")
+                ids = set()
+                for call in tool_calls:
+                    if not call["id"].strip() or not call["function"]["name"].strip() or call["id"] in ids:
+                        raise ToolCallError("Ollama returned incomplete or duplicate tool call IDs. Retry the response.")
+                    ids.add(call["id"])
+                    try:
+                        arguments = json.loads(call["function"]["arguments"])
+                    except (ValueError, TypeError) as exc:
+                        raise ToolCallError("Ollama returned invalid tool arguments. Retry the response.") from exc
+                    if not isinstance(arguments, dict):
+                        raise ToolCallError("Ollama returned invalid tool arguments. Retry the response.")
+            yield {"type": "done", "text": "", "usage": usage,
+                   "tool_calls": tool_calls, "finish_reason": finish_reason}
 
 
 def chat_once(model: str, messages: list[dict], params: dict) -> tuple[str, str | None, dict | None]:

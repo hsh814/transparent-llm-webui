@@ -11,6 +11,7 @@
   let observedList;
   let observer;
   let previousSurface;
+  let activeMessageRequest = null;
 
   function toast(message, error = false) {
     const box = $('#toast');
@@ -40,7 +41,7 @@
     const count = attachmentState(form).length;
     const state = [];
     if (count) state.push(`${count} ${count === 1 ? 'file' : 'files'}`);
-    if ($('[name="web_search"]', form).checked) state.push('Search on');
+    if ($('[name="web_search"]', form).checked) state.push('Search allowed');
     summary.textContent = state.length ? `· ${state.join(' · ')}` : '';
     summary.hidden = state.length === 0;
   }
@@ -72,21 +73,11 @@
       list.append(item);
     });
   }
-  function syncSearch(form) {
-    const checkbox = $('[name="web_search"]', form);
-    if (!checkbox) return;
-    const query = $('[name="search_query"]', form);
-    query.disabled = !checkbox.checked;
-    query.closest('label').hidden = !checkbox.checked;
-    syncInputSummary(form);
-  }
   function saveSearch(form) {
     const checkbox = $('[name="web_search"]', form);
     if (!checkbox) return;
-    storage('setItem', searchKey(form), JSON.stringify({
-      enabled: checkbox.checked, query: $('[name="search_query"]', form).value,
-    }));
-    syncSearch(form);
+    storage('setItem', searchKey(form), JSON.stringify({enabled: checkbox.checked}));
+    syncInputSummary(form);
   }
   function resize(textarea) {
     textarea.style.height = 'auto';
@@ -132,21 +123,43 @@
     const pending = $$('[data-generation-status="queued"], [data-generation-status="running"]', list);
     const composer = $('form.composer');
     if (composer) {
-      $('button[type="submit"]', composer).disabled = pending.length > 0 || composer.classList.contains('htmx-request');
+      $('button[type="submit"]', composer).disabled = pending.length > 0 || !!activeMessageRequest || composer.classList.contains('htmx-request');
       $('.btn-stop', composer).hidden = !pending.length;
       $('.composer-status', composer).textContent = pending.length ? (pending.length > 1 ? `${pending.length} chunks remaining` : 'Generating response…') : '';
     }
-    const deletes = $$('.delete-message', list);
-    const lastMessage = $$('.message[id^="message-"]', list).reduce((latest, el) => Math.max(latest, Number(el.id.slice(8))), 0);
-    deletes.forEach(button => { button.hidden = !!pending.length || button.closest('.message').id !== `message-${lastMessage}`; });
+    // Variants may have older database IDs than the preceding visible message.
+    // Only displayed order determines the terminal turn.
+    const saved = $$('.message[data-message-role]', list).filter(el => el.dataset.messageRole !== 'system');
+    const lastMessage = saved.at(-1);
+    const busy = pending.length > 0 || !!activeMessageRequest;
+    saved.forEach(message => {
+      const terminal = message === lastMessage;
+      message.dataset.terminal = String(terminal);
+      $$('[data-terminal-action]', message).forEach(button => {
+        button.hidden = !terminal || (button.matches('.request-response') && pending.length > 0);
+      });
+      const variants = $('.response-variants', message);
+      if (variants) {
+        variants.dataset.canSwitch = String(terminal && !busy);
+        $('.variant-lock', variants).hidden = terminal;
+        $$('[data-variant-action]', variants).forEach(button => {
+          button.title = terminal ? button.getAttribute('aria-label') : 'Fork to change this response';
+        });
+      }
+    });
+    $$('[data-message-mutation]', list).forEach(button => {
+      const terminal = button.closest('.message[data-message-role]') === lastMessage;
+      button.disabled = busy || button.dataset.unavailable === 'true' || (button.hasAttribute('data-variant-action') && !terminal);
+    });
     $$('.streaming .reasoning', list).forEach(el => {
       const hidden = !$('.reasoning-text', el).textContent;
       if (el.hidden !== hidden) el.hidden = hidden;
     });
     pending.forEach(el => {
-      if ($('.content', el)?.textContent || $('.reasoning-text', el)?.textContent) {
-        const label = $('.generation-label', el);
-        if (label.textContent !== 'Responding…') label.textContent = 'Responding…';
+      const progress = $('.generation-progress', el);
+      if ($('.content', progress || el)?.textContent || $('.reasoning-text', progress || el)?.textContent) {
+        const label = $('.generation-label', progress || el);
+        if (label && label.textContent !== 'Responding…') label.textContent = 'Responding…';
       }
     });
     if (followLatest) scrollBottom();
@@ -186,9 +199,8 @@
         let saved = {};
         try { saved = JSON.parse(storage('getItem', searchKey(form)) || '{}') || {}; } catch (_) { /* Ignore invalid saved settings. */ }
         $('[name="web_search"]', form).checked = saved.enabled === true;
-        $('[name="search_query"]', form).value = typeof saved.query === 'string' ? saved.query : '';
         $('.attachment-input', form).value = '';
-        syncSearch(form);
+        saveSearch(form);
         renderAttachments(form);
       }
     }
@@ -263,7 +275,6 @@
       resize(event.target);
     }
     if (event.target.id === 'chat-search') filterChats();
-    if (event.target.matches('.composer [name="search_query"]')) saveSearch(event.target.closest('form'));
   });
   document.addEventListener('change', event => {
     const form = event.target.closest('form.composer');
@@ -348,27 +359,40 @@
   });
   document.body.addEventListener('htmx:configRequest', event => {
     const form = event.detail.elt;
+    const composer = $('form.composer');
+    if (form.matches('form.composer, .request-response, .regenerate-response, .retry-generation')) {
+      event.detail.parameters.web_search = $('[name="web_search"]', composer || document)?.checked ? 'true' : 'false';
+    }
     if (!form.matches('form.composer') || form.dataset.mode !== 'chat') return;
     const entries = attachmentState(form);
     // An empty native file input becomes files='' in FormData; omit it entirely.
     delete event.detail.parameters.files;
     if (entries.length) event.detail.parameters.files = entries.map(entry => entry.file);
-    event.detail.parameters.web_search = $('[name="web_search"]', form).checked ? 'true' : 'false';
-    if (!$('[name="web_search"]', form).checked) delete event.detail.parameters.search_query;
     form._submittedFiles = [...entries];
   });
   document.body.addEventListener('htmx:beforeRequest', event => {
     const form = event.detail.elt;
     const title = $('.title-input', form);
     if (title) form._submittedTitle = title.value;
-    if (form.matches('form.composer')) {
-      if ($('.streaming') || !hasContent(form)) { event.preventDefault(); return; }
-      form._submittedDraft = $('textarea', form).value;
-      followLatest = true;
+    const sendsMessage = form.matches('form.composer');
+    const mutatesMessage = form.matches('[data-message-mutation]');
+    if (sendsMessage || mutatesMessage) {
+      if (activeMessageRequest || $('#message-list [data-generation-status="queued"], #message-list [data-generation-status="running"]')) {
+        event.preventDefault(); return;
+      }
+      if (sendsMessage && !hasContent(form)) { event.preventDefault(); return; }
+      activeMessageRequest = event.detail.xhr;
+      if (sendsMessage) {
+        form._submittedDraft = $('textarea', form).value;
+        followLatest = true;
+      }
+      syncMessages();
     }
   });
   document.body.addEventListener('htmx:afterRequest', event => {
-    const form = event.detail.elt;
+    const form = event.detail.requestConfig?.elt || event.detail.elt;
+    // htmx retargets afterRequest when a message action replaces its own button.
+    if (activeMessageRequest === event.detail.xhr) activeMessageRequest = null;
     const title = $('.title-input', form);
     const savedTitle = $('.session-item.active .session-title');
     if (event.detail.successful && title && savedTitle && title.value === form._submittedTitle) {

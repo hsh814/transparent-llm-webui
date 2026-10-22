@@ -73,7 +73,7 @@ def _messages(request: Request, session: dict) -> str:
 def send_message(
     request: Request, session_id: int, content: str = Form(""),
     files: list[UploadFile] | None = File(None),
-    web_search: bool = Form(False), search_query: str = Form(""),
+    web_search: bool = Form(False),
 ):
     session = _session(session_id)
     folder = db.get_folder(session["folder_id"])
@@ -84,13 +84,10 @@ def send_message(
     text = content.strip()
     if not text and not files:
         raise HTTPException(400, "Write a message or attach an image or PDF first.")
-    query = (search_query.strip() or text) if web_search else None
-    if web_search and not query:
-        raise HTTPException(400, "Enter a search query or message when web search is enabled.")
     chunks = _split_translation(text, folder["chunk_limit"] or 1000) if folder["type"] == "translation" else [text]
     try:
         attachments = inputs.prepare_uploads(files or [])
-        rows = db.enqueue_turns(session_id, chunks, attachments=attachments, search_query=query)
+        rows = db.enqueue_turns(session_id, chunks, attachments=attachments, web_search=web_search)
     except inputs.AttachmentError as exc:
         raise HTTPException(400, str(exc)) from exc
     except db.GenerationBusy as exc:
@@ -117,23 +114,24 @@ def stream_message(request: Request, session_id: int, since: int):
     generation.start(session_id)
 
     async def events():
-        content_pos = reasoning_pos = ticks = 0
-        search_snapshot = None
+        snapshots = {}
+        trace_snapshot = None
+        ticks = 0
         while not await request.is_disconnected():
             job = db.get_generation(session_id, since)
             if job is None:
                 yield _sse("done", "<div></div>")
                 return
-            if job["search_json"] != search_snapshot:
-                search_snapshot = job["search_json"]
-                yield _sse("search", templating.templates.env.get_template("_search.html").render(
-                    search=json.loads(search_snapshot) if search_snapshot else None,
+            if job["trace_id"] != trace_snapshot:
+                trace_snapshot = job["trace_id"]
+                yield _sse("trace", templating.trace_timeline(
+                    session, job, busy=job["status"] in ("queued", "running"),
                 ))
-            for key, position in (("content", content_pos), ("reasoning", reasoning_pos)):
-                if len(job[key]) > position:
-                    # htmx inserts SSE as HTML: wrap escaped text to preserve whitespace.
-                    yield _sse(key, "<span>" + escape(job[key]) + "</span>")
-            content_pos, reasoning_pos = len(job["content"]), len(job["reasoning"])
+            for key in ("content", "reasoning"):
+                if job[key] != snapshots.get(key):
+                    # Replace even with empty text: tool rounds reset partial output.
+                    snapshots[key] = job[key]
+                    yield _sse(key, "<span>" + escape(job[key] or "") + "</span>")
             if job["status"] not in ("queued", "running"):
                 # Only one EventSource per chat. Activate the next queued bubble
                 # and reconcile chunks that finished while this client was away.
@@ -161,15 +159,76 @@ def stop_generation(request: Request, session_id: int):
 
 
 @router.post("/sessions/{session_id}/retry", response_class=HTMLResponse)
-def retry_generation(request: Request, session_id: int):
+def retry_generation(request: Request, session_id: int, web_search: bool = Form(False)):
     session = _session(session_id)
     try:
-        if not db.retry_generations(session_id):
+        if not db.retry_generations(session_id, web_search=web_search):
             raise HTTPException(409, "Only the latest unfinished request can be retried.")
-    except db.GenerationBusy as exc:
+    except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
     generation.start(session_id)
     return _messages(request, session) + templating.session_sidebar(request, session)
+
+
+@router.post("/sessions/{session_id}/messages/{message_id}/fork", response_class=HTMLResponse)
+def fork_conversation(request: Request, session_id: int, message_id: int):
+    _session(session_id)
+    try:
+        fork = db.fork_session(session_id, message_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    folder = db.get_folder(fork["folder_id"])
+    return templating.folder_list_inner(
+        request, current_folder_id=folder["id"], current_session_id=fork["id"],
+    ) + templating.chat_surface_fragment(request, folder, fork, oob=True)
+
+
+@router.post("/sessions/{session_id}/messages/{message_id}/events/{event_index}/fork", response_class=HTMLResponse)
+def fork_event(
+    request: Request, session_id: int, message_id: int, event_index: int,
+    trace_id: str = Form(...),
+):
+    _session(session_id)
+    try:
+        fork = db.fork_session(session_id, message_id, event_index=event_index, trace_id=trace_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    folder = db.get_folder(fork["folder_id"])
+    return templating.folder_list_inner(
+        request, current_folder_id=folder["id"], current_session_id=fork["id"],
+    ) + templating.chat_surface_fragment(request, folder, fork, oob=True)
+
+
+@router.post("/sessions/{session_id}/messages/{message_id}/respond", response_class=HTMLResponse)
+def request_response(request: Request, session_id: int, message_id: int, web_search: bool = Form(False)):
+    session = _session(session_id)
+    try:
+        db.request_response(session_id, message_id, web_search=web_search)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    generation.start(session_id)
+    return _messages(request, session) + _usage(request, session)
+
+
+@router.post("/sessions/{session_id}/messages/{message_id}/regenerate", response_class=HTMLResponse)
+def regenerate_response(request: Request, session_id: int, message_id: int, web_search: bool = Form(False)):
+    session = _session(session_id)
+    try:
+        db.regenerate_response(session_id, message_id, web_search=web_search)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    generation.start(session_id)
+    return _messages(request, session) + _usage(request, session)
+
+
+@router.post("/sessions/{session_id}/messages/{user_message_id}/variants/{assistant_message_id}/select", response_class=HTMLResponse)
+def select_response(request: Request, session_id: int, user_message_id: int, assistant_message_id: int):
+    session = _session(session_id)
+    try:
+        db.select_response_variant(session_id, user_message_id, assistant_message_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return _messages(request, session) + _usage(request, session)
 
 
 @router.post("/sessions/{session_id}/translate", response_class=HTMLResponse)
@@ -219,16 +278,16 @@ def show_prompt(request: Request, session_id: int, message_id: int):
     message = next((m for m in rows if m["id"] == message_id and m["role"] in ("user", "assistant")), None)
     if message is None:
         raise HTTPException(404, "Request or response not found.")
-    job = next((j for j in db.list_generations(session_id)
-                if j["assistant_message_id"] == message_id or j["user_message_id"] == message_id), None)
+    job = db.get_message_generation(session_id, message_id)
     if job is None and message["role"] == "user":
         raise HTTPException(404, "The original request was not stored for this message.")
     note = None
     if job is not None:
-        messages = json.loads(job["messages_json"])
+        messages = job["messages"]
     else:
         note = "Legacy response: this is a best-effort reconstruction; the original request was not stored."
-        messages = [{"role": m["role"], "content": m["content"]} for m in rows
+        visible = db.visible_messages(session_id)
+        messages = [{"role": m["role"], "content": m["content"]} for m in visible
                     if m["id"] < message_id and m["role"] in ("user", "assistant")]
         if folder["type"] == "translation":
             users = [m for m in rows if m["role"] == "user"]
@@ -242,8 +301,30 @@ def show_prompt(request: Request, session_id: int, message_id: int):
         "session": session, "message": message, "messages": messages,
         "messages_json": json.dumps(messages, ensure_ascii=False, indent=2),
         "sys_note": note, "recorded": job is not None,
-        "request_params": json.loads(job["params_json"]) if job else None,
+        "request_params": job["params"] if job else None,
         "job": job,
-        "attachments": json.loads(user["attachments_json"]) if user else [],
-        "search": json.loads(job["search_json"]) if job and job["search_json"] else None,
+        "attachments": user["attachments"] if user else [],
+        "request_tools": job.get("tools", []) if job else [],
+        "request_snapshot": job.get("request") if job else None,
+    })
+
+
+@router.get("/sessions/{session_id}/messages/{message_id}/events/{event_index}/prompt", response_class=HTMLResponse)
+def show_event_prompt(
+    request: Request, session_id: int, message_id: int, event_index: int, trace_id: str,
+):
+    session = _session(session_id)
+    try:
+        job = db.get_event_generation(session_id, message_id, event_index, trace_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if job is None:
+        raise HTTPException(404, "This tool-call request is no longer available at that trace boundary.")
+    return templating.templates.TemplateResponse(request, "_prompt_viewer.html", {
+        "session": session, "message": None, "messages": job["messages"],
+        "messages_json": json.dumps(job["messages"], ensure_ascii=False, indent=2),
+        "sys_note": "Exact saved model request for this assistant tool-call round.",
+        "recorded": True, "request_params": job["params"], "job": job,
+        "attachments": [], "request_tools": job.get("tools", []),
+        "request_snapshot": job.get("request"),
     })

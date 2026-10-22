@@ -5,29 +5,26 @@
   <a href="/sessions/{{ session.id }}">Back to chat</a>
   <h1>Prompt</h1>
   {% set active_job = job | default(None) %}
-  {% set saved_search = search | default(None) %}
   {% if active_job %}
   <p>Job status: <strong>{{ active_job.status }}</strong></p>
-  {% if active_job.error and (not saved_search or active_job.error != saved_search.error) %}<p class="error-text">{{ active_job.error }}</p>{% endif %}
+  {% if active_job.error %}<p class="error-text">{{ active_job.error }}</p>{% endif %}
   {% endif %}
-  {% if saved_search and saved_search.status != 'completed' %}
-  <p class="preparation-notice">Prepared request only: web search has not completed. These messages are not finalized and have not been sent to the model. A retry may complete search and enrich the saved request.</p>
-  {% elif active_job and active_job.status == 'queued' %}
-  <p class="preparation-notice">Saved request is queued for this attempt. This view does not confirm delivery to the model.</p>
+  {% if active_job and active_job.status in ('queued', 'idle') %}
+  <p class="preparation-notice">Saved request is {{ 'idle until you explicitly continue' if active_job.status == 'idle' else 'queued for this attempt' }}. This view does not confirm delivery to the model.</p>
   {% else %}
   <p>{{ 'Exact saved API messages, in request order. Saved messages alone do not prove that the model received or completed the request.' if recorded else 'Reconstructed messages — the exact original request is unavailable.' }}</p>
   {% endif %}
   {% if sys_note %}<p>{{ sys_note }}</p>{% endif %}
   <p>Model: <code>{{ active_job.model if active_job else message.model }}</code></p>
   {% with attachments=attachments | default([]) %}{% include "_attachments.html" %}{% endwith %}
-  {% with search=saved_search, search_expanded=True %}{% include "_search.html" %}{% endwith %}
   <p>Text and image parts are shown below in order. Images require a vision-capable model; PDF pages include both rendered images and extracted text. Model accuracy is not guaranteed. Full image base64 is available in the exact JSON details.</p>
   {% for m in messages %}
   <section class="prompt-message">
     <h2>{{ m.role }}</h2>
+    {% if m.tool_call_id %}<p>Tool call ID: <code>{{ m.tool_call_id }}</code>{% if m.name %} · <code>{{ m.name }}</code>{% endif %}</p>{% endif %}
     {% if m.content is string %}
     <pre>{{ m.content }}</pre>
-    {% else %}
+    {% elif m.content %}
     {% for part in m.content %}
     {% if part.type == 'text' %}
     <pre>{{ part.text }}</pre>
@@ -38,6 +35,13 @@
     {% endif %}
     {% endfor %}
     {% endif %}
+    {% if m.tool_calls %}
+    <h3>Assistant tool calls</h3>
+    {% for call in m.tool_calls %}
+    <p><code>{{ call.function.name }}</code> · Call ID: <code>{{ call.id }}</code> · {{ call.type }}</p>
+    <pre>{{ call.function.arguments }}</pre>
+    {% endfor %}
+    {% endif %}
   </section>
   {% endfor %}
   <details class="exact-request">
@@ -45,6 +49,16 @@
     <button class="btn-mini" type="button" id="copy-prompt-btn">Copy messages JSON</button>
     <pre id="prompt-messages">{{ messages_json }}</pre>
   </details>
+  {% if recorded %}
+  <section class="prompt-tools">
+    <h2>Exact tools schema</h2>
+    <p>{{ 'The model was permitted to request these tools on this round.' if request_tools else 'No tools were offered on this round.' }}</p>
+    <pre id="prompt-tools">{{ request_tools | tojson(indent=2) }}</pre>
+  </section>
+  {% if request_snapshot %}
+  <details class="exact-request"><summary>Exact saved model request snapshot</summary><pre id="prompt-request">{{ request_snapshot | tojson(indent=2) }}</pre></details>
+  {% endif %}
+  {% endif %}
   {% if request_params is not none %}
   <details>
     <summary>Saved generation settings</summary>

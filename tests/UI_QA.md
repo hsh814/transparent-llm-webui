@@ -1,5 +1,32 @@
 # Browser QA inventory
 
+## Model-driven search and event forks
+
+- Verified 67 offline regressions and 59 repeatable browser checks with isolated databases and simulated model/search responses. Browser artifacts: `test-results/browser-cMJ00n/`.
+- Coverage includes streamed multi-call fragments, permission without forced search, model-selected queries, separate assistant/tool roles, per-round Prompt, multi-call result boundaries, explicit continuation, variant-owned traces, cancellation/restart pairing, stale writes, and legacy migration without losing historical inputs.
+- A throwaway wire-level smoke exercised the production HTTP adapters and worker using `httpx.MockTransport`: two model requests, one generated-query search, exact per-round message/tool snapshots, unchanged user input, and aggregate usage of 22 tokens. No `tool_choice` was sent.
+- Interactive Chromium smoke uploaded an original PNG and a real two-page PDF, completed two search rounds, and inspected the second round's Prompt: user → assistant call → tool result, with all three image parts preserved and no search text injected into user content. Forking after the first result excluded the second round; Continue with permission off reused that result without another search.
+- Source snippets were read inline; running status appeared before the answer. Desktop and 320px surfaces were visually inspected, with unique DOM IDs, no horizontal overflow, and no browser errors. Corrected assistant-call card padding so generic assistant styles do not remove its inset.
+- The two interactive chats retained three shared image values rather than duplicating their PNG/PDF page bytes. The test database, browser tabs, and preview server were isolated from the user's workspace data. Live Ollama behavior remains dependent on the selected model's tool support and was not exercised against the cloud.
+- A rejected-search state probe caught a transient `running` event even though permission prevented any network call. Rejections now persist failed outcomes directly; the same probe confirmed zero intermediate running states and zero search requests.
+
+## Shared immutable payload follow-up
+
+- Verified 60 offline regressions and 46 repeatable browser checks. Migration tests preserve historical variants, explicit unknown legacy requests, IDs/dates, unfinished attempts, and shared references; an injected mid-migration failure rolls back and permits retry.
+- Interactive Chromium smoke submitted one image, a two-page PDF, and web search, then regenerated and forked the selected answer. Stored payload data remained 67 nodes / 29,904 body bytes with three image values; all three saved responses shared one request root.
+- After deleting the source chat, the fork's Prompt JSON matched exactly and its PDF page still rendered. Deleting the final fork left zero payload nodes and edges. Browser errors were empty; real Ollama was not contacted.
+- A separate throwaway legacy database reproduced the old duplication, migrated successfully, and retained identical requests after source deletion. An additional fork added zero immutable payload bytes.
+- Repeatable browser artifacts: `test-results/browser-aAxmqP/`. Shared-file preview was visually inspected in a separate isolated browser session. The user's database was not used.
+
+## Fork / response-version follow-up
+
+- Verified 56 offline regressions and 46 repeatable browser checks with temporary databases and simulated model/search responses.
+- Browser coverage includes retained answers during regeneration, repeated previous/next selection without reload, selected-version follow-up context, intermediate-message forks, deletion followed by Request response without duplicate input, and working response controls at 320px.
+- Additional interactive checks used an image and a two-page PDF with search: the following request retained all three image parts and only the selected answer; forks preserved the selected prefix. Forking at a user message stayed idle until explicitly requested. Stopping regeneration preserved the complete prior answer, and retry added a new version.
+- Fixed a real htmx lifecycle bug: replacing a mutation button retargets `afterRequest` to a surviving ancestor. Tracking the request's XHR rather than the removed button releases the busy lock reliably. The browser suite exercises consecutive mutations to prevent recurrence.
+- Desktop and settled 320px screenshots were inspected. The text box remains one empty line, with More inputs and Send outside it; response actions fit without horizontal overflow. The repeatable run saved screenshots in `test-results/browser-unI23B/`, including `mobile-response-versions.png`.
+- No live Ollama call was used. Mobile verification used Chromium touch emulation; a cancelled SSE connection during Stop is expected.
+
 ## Automatic title / last-modified follow-up
 
 - Requirements: unique empty-chat labels; deterministic first-input titles, normalized whitespace and 60-character truncation; preserve manual titles; clearing a title restores automatic mode; backfill legacy unnamed chats without changing their dates.

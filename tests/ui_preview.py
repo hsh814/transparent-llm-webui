@@ -1,5 +1,6 @@
 """Isolated browser QA server. Requires an explicit temporary CHAT_DB_PATH."""
 
+import json
 import os
 import time
 
@@ -11,12 +12,39 @@ os.environ["OLLAMA_API_KEY"] = "browser-qa-placeholder"
 import ollama
 
 _failed_once: set[str] = set()
+_response_versions: dict[str, int] = {}
 
 
-def preview_stream(model, messages, params):
-    source = messages[-1]["content"]
+def preview_stream(model, messages, params, *, tools=None):
+    user_index = max(i for i, message in enumerate(messages) if message["role"] == "user")
+    source = messages[user_index]["content"]
     if isinstance(source, list):
         source = "\n".join(part["text"] for part in source if part["type"] == "text")
+    completed = sum(message["role"] == "tool" for message in messages[user_index + 1:])
+    required = 2 if "[multi-search]" in source or "[two-round-search]" in source else 1
+    if tools and "[no-search]" not in source and completed < required:
+        indexes = range(1, 3) if "[multi-search]" in source else [completed + 1]
+        calls = []
+        for index in indexes:
+            query = f"paper table figure evidence {index}"
+            if "[search-fail]" in source:
+                query += " [search-fail]"
+            calls.append({"id": f"search-{index}", "type": "function", "function": {
+                "name": "web_search", "arguments": json.dumps({"query": query, "max_results": 2}),
+            }})
+        time.sleep(0.4)
+        yield {"type": "reasoning", "text": "Choosing a focused search query."}
+        yield {"type": "content", "text": "I will check the sources."}
+        yield {"type": "done", "finish_reason": "tool_calls", "tool_calls": calls,
+               "usage": {"prompt_tokens": 8, "completion_tokens": 4, "total_tokens": 12}}
+        return
+    if "[variants]" in source:
+        version = _response_versions.get(source, 0) + 1
+        _response_versions[source] = version
+        time.sleep(0.4)
+        yield {"type": "content", "text": f"Response version {version} for this input."}
+        yield {"type": "done", "usage": {"prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20}}
+        return
     if "[fail]" in source and source not in _failed_once:
         _failed_once.add(source)
         time.sleep(0.3)

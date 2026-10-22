@@ -1,16 +1,38 @@
-<div class="message assistant {{ 'streaming' if job.status in ('queued', 'running') else 'generation-error' }}"
-     id="stream-bubble-{{ job.user_message_id }}" data-generation-status="{{ job.status }}"
+<div class="response-group" id="stream-bubble-{{ job.user_message_id }}" data-user-message-id="{{ job.user_message_id }}" data-generation-status="{{ job.status }}"
+     {% if oob %}hx-swap-oob="outerHTML:#stream-bubble-{{ job.user_message_id }}"{% endif %}
      {% if connect %}sse-connect="/sessions/{{ session.id }}/stream?since={{ job.user_message_id }}" sse-close="done" sse-swap="done" hx-swap="outerHTML"{% endif %}>
-  <div class="message-meta"><span class="role-label">Assistant</span><span class="badge">{{ job.model }}</span><span class="generation-label">{{ 'Preparing request…' if job.status == 'running' else 'Queued' if job.status == 'queued' else 'Stopped' if job.status == 'cancelled' else 'Could not finish' }}</span><a class="btn-mini" target="_blank" rel="noopener" href="/sessions/{{ session.id }}/messages/{{ job.user_message_id }}/prompt">Prompt</a></div>
-  {% set search = job.search_json | default(None) | from_json %}
-  <div{% if job.status in ('queued', 'running') %} sse-swap="search" hx-swap="innerHTML"{% endif %}>{% include "_search.html" %}</div>
-  {% if job.status in ('queued', 'running') %}
-  <details class="reasoning" hidden><summary>Thinking</summary><div class="reasoning-text" sse-swap="reasoning" hx-swap="innerHTML"></div></details>
-  <div class="content" sse-swap="content" hx-swap="innerHTML"></div>
-  {% else %}
-  {% if job.reasoning %}<details class="reasoning"><summary>Thinking (partial)</summary><div class="reasoning-text">{{ job.reasoning }}</div></details>{% endif %}
-  {% if job.content %}<div class="content">{{ job.content }}</div>{% endif %}
-  {% if not search or job.error != search.error %}<p class="error-text">{{ job.error }}</p>{% endif %}
-  {% if retryable %}<button class="btn-mini" hx-post="/sessions/{{ session.id }}/retry" hx-target="#message-list" hx-swap="innerHTML">Retry with original settings</button>{% endif %}
+  {% if message %}
+  <div class="tool-timeline selected-tool-timeline" id="selected-trace-{{ job.user_message_id }}">
+    {% with trace_job=response_job, trace=response_job.trace if response_job else [] %}{% include "_tool_timeline.html" %}{% endwith %}
+  </div>
+  {% with job=response_job %}{% include "_message_bubble.html" %}{% endwith %}
+  {% endif %}
+  {% if not message or job.status not in ('completed', 'idle') %}
+  {% if message %}<p class="retained-response-note">{{ 'Generating another response. The selected response and its search history above are kept until this finishes.' if active else 'The selected response and its search history above have been kept.' }}</p>{% endif %}
+  {% if job.status == 'idle' and job.trace %}<p class="included-trace-note">Included tool history ends here. Continue response explicitly to resume; web search permission is off by default in a new fork.</p>{% endif %}
+  <div class="tool-timeline current-tool-timeline" id="current-trace-{{ job.user_message_id }}"{% if active %} sse-swap="trace" hx-swap="innerHTML"{% endif %}>
+    {% with trace_job=job, trace=job.trace %}{% include "_tool_timeline.html" %}{% endwith %}
+  </div>
+  {% if job.status == 'idle' and job.trace %}
+  <div class="message-actions">
+    <button class="btn-mini request-response continue-response" type="button" data-message-mutation {% if busy %}disabled{% endif %}
+            hx-post="/sessions/{{ session.id }}/messages/{{ job.user_message_id }}/respond"
+            hx-target="#message-list" hx-swap="innerHTML" hx-sync="#message-list:drop">Continue response</button>
+  </div>
+  {% endif %}
+  {% if job.status not in ('completed', 'idle') %}
+  <div class="message assistant generation-progress {{ 'streaming' if active else 'generation-error' }}">
+    <div class="message-meta"><span class="role-label">Assistant</span><span class="badge">{{ job.model }}</span><span class="generation-label">{{ 'Responding…' if job.status == 'running' else 'Queued' if job.status == 'queued' else 'Stopped' if job.status == 'cancelled' else 'Could not finish' }}</span><a class="btn-mini" target="_blank" rel="noopener" href="/sessions/{{ session.id }}/messages/{{ job.user_message_id }}/prompt">Prompt</a></div>
+    {% if active %}
+    <details class="reasoning"{% if not job.reasoning %} hidden{% endif %}><summary>Thinking</summary><div class="reasoning-text" sse-swap="reasoning" hx-swap="innerHTML">{{ job.reasoning }}</div></details>
+    <div class="content" sse-swap="content" hx-swap="innerHTML">{{ job.content }}</div>
+    {% else %}
+    {% if job.reasoning %}<details class="reasoning"><summary>Thinking (partial)</summary><div class="reasoning-text">{{ job.reasoning }}</div></details>{% endif %}
+    {% if job.content %}<div class="content">{{ job.content }}</div>{% endif %}
+    {% if job.error %}<p class="error-text">{{ job.error }}</p>{% endif %}
+    {% if retryable %}<button class="btn-mini retry-generation" type="button" data-message-mutation hx-post="/sessions/{{ session.id }}/retry" hx-target="#message-list" hx-swap="innerHTML" hx-sync="#message-list:drop" {% if busy %}disabled{% endif %}>Retry with saved settings</button>{% endif %}
+    {% endif %}
+  </div>
+  {% endif %}
   {% endif %}
 </div>

@@ -24,7 +24,8 @@ templates.env.globals["asset_url"] = asset_url
 
 def _from_json(value: str) -> dict:
     try:
-        return json.loads(value or "{}")
+        parsed = json.loads(value or "{}")
+        return parsed if isinstance(parsed, dict) else {}
     except (TypeError, ValueError):
         return {}
 
@@ -86,45 +87,65 @@ def chat_context(session: dict) -> dict:
     return {"models": list(dict.fromkeys([session["model"], *models])), "ctx_cap": ctx_cap, "usage": db.model_usage()}
 
 
+def message_controls(session: dict, message: dict, *, rows=None, jobs=None) -> dict:
+    """Small action metadata, also used by append-only message fragments."""
+    if rows is None:
+        rows, jobs = db.conversation_snapshot(session["id"])
+    jobs = jobs or []
+    model_conversation = db.get_folder(session["folder_id"])["type"] != "memo"
+    latest = next((row for row in reversed(rows) if row["role"] != "system"), None)
+    return {
+        "is_last": bool(latest and latest["id"] == message["id"]),
+        "can_respond": model_conversation and message["role"] == "user",
+        "has_trace": any(job["user_message_id"] == message["id"] and job.get("trace") for job in jobs),
+        "can_regenerate": model_conversation and message["role"] == "assistant",
+        "active": any(job["status"] in ("queued", "running") for job in jobs),
+        "variants": db.response_variant_state(session["id"], message["user_message_id"])
+        if message.get("user_message_id") else None,
+    }
+
+
 def chat_messages(session_id: int) -> list[dict]:
     rows, generations = db.conversation_snapshot(session_id)
+    session = db.get_session(session_id)
     jobs = {job["user_message_id"]: job for job in generations}
-    live = next((job["user_message_id"] for job in jobs.values() if job["status"] in ("queued", "running")), None)
-    answers = {job["assistant_message_id"] for job in jobs.values() if job["assistant_message_id"]}
-    by_id = {row["id"]: row for row in rows}
+    live = next((job["user_message_id"] for job in generations if job["status"] in ("queued", "running")), None)
+    answers = {job["assistant_message_id"] for job in generations if job["assistant_message_id"]}
     result = []
     for row in rows:
         if row["id"] in answers:
             continue
         job = jobs.get(row["id"])
-        result.append({**row, "job": job})
+        result.append({**row, "job": job, "ui": message_controls(session, row, rows=rows, jobs=generations)})
         if job:
-            if job["assistant_message_id"] in by_id:
-                result.append({**by_id[job["assistant_message_id"]], "job": job})
-            elif job["status"] != "completed":
-                result.append({"role": "generation", "id": row["id"], "job": job, "connect": live == row["id"]})
+            result.append({"role": "generation", "id": row["id"], "job": job, "connect": live == row["id"]})
     return result
 
 
+def trace_timeline(session: dict, job: dict, *, busy: bool = False) -> str:
+    return templates.env.get_template("_tool_timeline.html").render(
+        session=session, trace_job=job, trace=job.get("trace", []), busy=busy,
+    )
+
+
 def generation_bubble(request, session: dict, job: dict, oob=False, connect=None) -> str:
-    if job["status"] == "completed":
-        message = next((m for m in db.list_messages(session["id"]) if m["id"] == job["assistant_message_id"]), None)
-        inner = templates.env.get_template("_message_bubble.html").render(
-            request=request, session=session, message=message, job=job,
-            is_last=message["id"] == (db.last_message(session["id"]) or {}).get("id"),
-        ) if message else ""
-    else:
-        jobs = db.list_generations(session["id"])
-        if connect is None:
-            live = next((j["user_message_id"] for j in jobs if j["status"] in ("queued", "running")), None)
-            connect = live == job["user_message_id"]
-        latest_batch = jobs[-1]["batch_id"] if jobs else None
-        inner = templates.env.get_template("_stream_bubble.html").render(
-            request=request, session=session, job=job, connect=connect,
-            retryable=job["batch_id"] == latest_batch,
-        )
-    if oob:
-        return (inner or '<div></div>').replace('<div', f'<div hx-swap-oob="outerHTML:#stream-bubble-{job["user_message_id"]}"', 1)
+    rows, jobs = db.conversation_snapshot(session["id"])
+    message = next((row for row in rows if row["id"] == job["assistant_message_id"]), None)
+    active = job["status"] in ("queued", "running")
+    if connect is None:
+        live = next((j["user_message_id"] for j in jobs if j["status"] in ("queued", "running")), None)
+        connect = live == job["user_message_id"]
+    if message:
+        message = {**message, "user_message_id": job["user_message_id"]}
+        message["ui"] = message_controls(session, message, rows=rows, jobs=jobs)
+    inner = templates.env.get_template("_stream_bubble.html").render(
+        request=request, session=session, job=job, message=message,
+        response_job=db.get_message_generation(session["id"], message["id"]) if message else None,
+        connect=bool(active and connect), active=active,
+        busy=any(j["status"] in ("queued", "running") for j in jobs),
+        retryable=bool(jobs and job["batch_id"] == jobs[-1]["batch_id"]),
+        oob=oob,
+    )
     return inner
 
 
@@ -132,6 +153,7 @@ templates.env.globals["chat_context"] = chat_context
 templates.env.globals["chat_messages"] = chat_messages
 templates.env.globals["session_token_total"] = db.session_token_total
 templates.env.globals["generation_bubble"] = generation_bubble
+templates.env.globals["message_controls"] = message_controls
 templates.env.globals["last_message"] = db.last_message
 
 

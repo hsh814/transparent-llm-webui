@@ -1,10 +1,8 @@
 {% set visible = messages | rejectattr('role', 'equalto', 'system') | list %}
-{% set latest = last_message(session.id) %}
 {% for message in visible %}
-{% if message.role == 'generation' %}
-{{ generation_bubble(request, session, message.job, connect=message.connect) | safe }}
+{% if message.role == 'generation' or (message.role == 'assistant' and message.job | default(None)) %}
+{{ generation_bubble(request, session, message.job, connect=message.connect | default(False)) | safe }}
 {% else %}
-{% set is_last = latest and message.id == latest.id %}
 {% set job = message.job | default(None) %}
 {% include "_message_bubble.html" %}
 {% endif %}

@@ -105,11 +105,11 @@ try {
   await page.locator('.composer textarea').fill('[fail] Retry regression');
   await page.locator('.composer textarea').press('Enter');
   await finished(page);
-  await page.getByRole('button', { name: 'Retry with original settings' }).last().click();
+  await page.locator('.retry-generation').last().click();
   await finished(page);
-  check('retry finishes without duplicating the response', await page.locator('.message.assistant:not([data-generation-status])').count() === 1);
+  check('retry finishes without duplicating the response', await page.locator('.message[data-message-role="assistant"]').count() === 1);
   check('literal model HTML remains inert', await page.evaluate(() => !window.unsafeExecuted));
-  check('output indentation is preserved', (await page.locator('.message.assistant:not([data-generation-status]) .content').textContent()).includes('\n    indented  code'));
+  check('output indentation is preserved', (await page.locator('.message[data-message-role="assistant"] .content').textContent()).includes('\n    indented  code'));
   check('later messages leave the first-message title intact', await page.getByLabel('Chat title', { exact: true }).inputValue() === automaticTitle);
   check('completed response refreshes sidebar modification time', new Date(await page.locator('.session-item.active time').getAttribute('datetime')) > new Date(sentAt));
 
@@ -198,6 +198,139 @@ try {
   await mobilePage.setViewportSize({ width: 390, height: 844 });
   check('mobile regions fit at 390px', await fit(mobilePage));
   await mobilePage.screenshot({ path: path.join(artifacts, 'mobile-chat.png'), scale: 'css' });
+  await page.locator('.new-conversation').click();
+  await settle(page);
+  await page.locator('.composer textarea').fill('[variants] Branch regression');
+  await page.locator('.composer textarea').press('Enter');
+  await finished(page);
+  const firstAnswerId = await page.locator('.message[data-message-role="assistant"]').getAttribute('id');
+  await page.getByRole('button', { name: 'Regenerate', exact: true }).click();
+  await page.locator('.generation-progress').waitFor();
+  check('regeneration keeps the existing response while running',
+    (await page.locator(`#${firstAnswerId} .content`).textContent()).includes('version 1'));
+  await finished(page);
+  check('regeneration appends a selected response version', await page.locator('.variant-position').textContent() === '2/2');
+  check('replacing a mutation button unlocks the composer', await page.locator('.composer button[type=submit]').isEnabled());
+  await page.getByRole('button', { name: 'Previous response', exact: true }).click();
+  await settle(page);
+  check('previous response selects the original answer', await page.locator('.variant-position').textContent() === '1/2'
+    && (await page.locator('.message[data-message-role="assistant"] .content').textContent()).includes('version 1'));
+  await page.getByRole('button', { name: 'Next response', exact: true }).click();
+  await settle(page);
+  check('next response remains usable after the first switch', await page.locator('.variant-position').textContent() === '2/2');
+  await page.getByRole('button', { name: 'Previous response', exact: true }).click();
+  await settle(page);
+  await page.locator('.composer textarea').fill('[instant] Continue selected version');
+  await page.locator('.composer textarea').press('Enter');
+  await finished(page);
+  const prompt = await context.newPage();
+  await prompt.goto(base + await page.locator('.message[data-message-role="assistant"] a').last().getAttribute('href'));
+  const input = JSON.parse(await prompt.locator('#prompt-messages').textContent());
+  check('follow-up context contains only the selected version',
+    input.filter(message => message.role === 'assistant').map(message => message.content).join() === 'Response version 1 for this input.');
+  await prompt.close();
+  check('earlier-turn version controls lock after follow-up', await page.locator(`#${firstAnswerId} .variant-next`).isDisabled());
+  await page.locator(`#${firstAnswerId} .fork-message`).click();
+  await settle(page);
+  check('intermediate fork keeps only the selected prefix', await page.locator('.message[data-message-role]').count() === 2
+    && (await page.locator('.message[data-message-role="assistant"] .content').textContent()).includes('version 1')
+    && await page.locator('.variant-position').textContent() === '1/1');
+  page.removeAllListeners('dialog');
+  page.once('dialog', dialog => dialog.accept());
+  await page.locator('.delete-message:visible').click();
+  await settle(page);
+  page.on('dialog', dialog => dialog.dismiss());
+  check('deleting the answer exposes an explicit response request', await page.getByRole('button', { name: 'Request response', exact: true }).isVisible());
+  await page.getByRole('button', { name: 'Request response', exact: true }).click();
+  await finished(page);
+  check('requesting again does not duplicate the user message', await page.locator('.message[data-message-role="user"]').count() === 1
+    && (await page.locator('.message[data-message-role="assistant"] .content').textContent()).includes('version 3'));
+  await mobilePage.setViewportSize({ width: 320, height: 640 });
+  await mobilePage.goto(page.url());
+  await mobilePage.getByRole('button', { name: 'Regenerate', exact: true }).tap();
+  await finished(mobilePage);
+  await mobilePage.getByRole('button', { name: 'Previous response', exact: true }).tap();
+  await settle(mobilePage);
+  check('response controls work and fit at 320px', await mobilePage.locator('.variant-position').textContent() === '1/2'
+    && await mobilePage.locator('.composer button[type=submit]').isEnabled() && await fit(mobilePage));
+  await mobilePage.screenshot({ path: path.join(artifacts, 'mobile-response-versions.png'), scale: 'css' });
+  await page.locator('.new-conversation').click();
+  await settle(page);
+  await page.locator('.input-tools-toggle').click();
+  await page.locator('[name="web_search"]').check();
+  const searchInput = '[multi-search] Compare the paper results';
+  await page.locator('.composer textarea').fill(searchInput);
+  await page.locator('.composer textarea').press('Enter');
+  await page.locator('.tool-result[data-event-status="running"]').first().waitFor();
+  check('tool calls and running search appear before the answer',
+    await page.locator('.tool-call').count() === 1
+    && await page.locator('.message[data-message-role="assistant"]').count() === 0
+    && await page.locator('[sse-connect]').count() === 1);
+  await finished(page);
+  const searchSourceURL = page.url();
+  const timeline = await page.locator('.message[data-message-role], .tool-event').evaluateAll(elements =>
+    elements.map(element => element.dataset.messageRole || `event:${element.dataset.eventKind}`));
+  check('conversation orders user, model call, separate results, and final answer',
+    timeline.join() === 'user,event:assistant,event:tool,event:tool,assistant');
+  await page.locator('.source-snippet summary').first().click();
+  check('saved source snippets can be read in the result itself',
+    await page.locator('.source-snippet p').first().isVisible()
+    && (await page.locator('.source-snippet p').first().textContent()).includes('42 samples'));
+  const toolPrompt = await context.newPage();
+  await toolPrompt.goto(base + await page.locator('.tool-call a').first().getAttribute('href'));
+  const roundOne = JSON.parse(await toolPrompt.locator('#prompt-messages').textContent());
+  const toolSchema = JSON.parse(await toolPrompt.locator('#prompt-tools').textContent());
+  check('tool-call Prompt shows the original input and offered tool',
+    roundOne.at(-1).content === searchInput && toolSchema[0].function.name === 'web_search');
+  await toolPrompt.goto(base + await page.locator('.message[data-message-role="assistant"] a').getAttribute('href'));
+  const searchedRequest = JSON.parse(await toolPrompt.locator('#prompt-messages').textContent())
+    .filter(message => message.role !== 'system');
+  check('answer Prompt separates raw user input from paired tool results',
+    searchedRequest[0].content === searchInput
+    && searchedRequest.map(message => message.role).join() === 'user,assistant,tool,tool'
+    && searchedRequest[2].tool_call_id === searchedRequest[1].tool_calls[0].id
+    && searchedRequest[3].tool_call_id === searchedRequest[1].tool_calls[1].id);
+  await toolPrompt.close();
+  await page.screenshot({ path: path.join(artifacts, 'tool-search-timeline.png'), scale: 'css' });
+  await page.locator('.message[data-message-role="user"] .fork-message').click();
+  await settle(page);
+  check('forking at user excludes later tool history and clears permission',
+    await page.locator('.tool-event').count() === 0 && !await page.locator('[name="web_search"]').isChecked());
+  await page.locator('.request-response').click();
+  await finished(page);
+  check('responding to the clean fork does not silently execute a search',
+    await page.locator('.tool-event').count() === 0
+    && await page.locator('.message[data-message-role="assistant"]').count() === 1);
+  await page.goto(searchSourceURL);
+  await page.locator('.tool-result .fork-event').first().click();
+  await settle(page);
+  check('forking through the first result excludes the second result and answer',
+    await page.locator('.tool-call').count() === 1 && await page.locator('.tool-result').count() === 1
+    && await page.locator('.message[data-message-role="assistant"]').count() === 0
+    && await page.locator('.continue-response').isVisible());
+  await page.locator('.input-tools-toggle').click();
+  await page.locator('[name="web_search"]').check();
+  await page.locator('.continue-response').click();
+  await finished(page);
+  check('explicit continuation reuses included results and completes only the missing call',
+    await page.locator('.tool-call').count() === 1 && await page.locator('.tool-result').count() === 2
+    && await page.locator('.message[data-message-role="assistant"]').count() === 1);
+  await page.locator('[name="web_search"]').uncheck();
+  await page.locator('.regenerate-response').click();
+  await page.locator('.generation-progress').waitFor();
+  check('regeneration retains the selected tool history while starting a clean attempt',
+    await page.locator('.selected-tool-timeline .tool-result').count() === 2
+    && await page.locator('.current-tool-timeline .tool-result').count() === 0);
+  await finished(page);
+  check('regeneration respects the current disabled search permission',
+    await page.locator('.tool-event').count() === 0 && await page.locator('.variant-position').textContent() === '2/2');
+  await page.getByRole('button', { name: 'Previous response', exact: true }).click();
+  await settle(page);
+  check('selecting a response version restores its own tool history',
+    await page.locator('.tool-result').count() === 2 && await page.locator('.variant-position').textContent() === '1/2');
+  await mobilePage.goto(page.url());
+  check('tool history fits a 320px viewport', await fit(mobilePage));
+  await mobilePage.screenshot({ path: path.join(artifacts, 'mobile-tool-history.png'), scale: 'css' });
   check('no browser console or JavaScript errors', errors.length === 0);
   console.log(`\n${checks.length} browser checks passed. Screenshots: ${artifacts}`);
 } finally {

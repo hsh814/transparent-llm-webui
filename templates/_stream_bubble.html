@@ -8,8 +8,8 @@
   {% with job=response_job %}{% include "_message_bubble.html" %}{% endwith %}
   {% endif %}
   {% if not message or job.status not in ('completed', 'idle') %}
-  {% if message %}<p class="retained-response-note">{{ 'Generating another response. The selected response and its search history above are kept until this finishes.' if active else 'The selected response and its search history above have been kept.' }}</p>{% endif %}
-  {% if job.status == 'idle' and job.trace %}<p class="included-trace-note">Included tool history ends here. Continue response explicitly to resume; web search permission is off by default in a new fork.</p>{% endif %}
+  {% if message %}<p class="retained-response-note">{{ 'Generating another response. The selected response and its tool history above are kept until this finishes.' if active else 'The selected response and its tool history above have been kept.' }}</p>{% endif %}
+  {% if job.status == 'idle' and job.trace %}<p class="included-trace-note">Included tool history ends here. Continue response explicitly to resume; web access permission is off by default in a new fork.</p>{% endif %}
   <div class="tool-timeline current-tool-timeline" id="current-trace-{{ job.user_message_id }}"{% if active %} sse-swap="trace" hx-swap="innerHTML"{% endif %}>
     {% with trace_job=job, trace=job.trace %}{% include "_tool_timeline.html" %}{% endwith %}
   </div>

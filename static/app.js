@@ -41,7 +41,7 @@
     const count = attachmentState(form).length;
     const state = [];
     if (count) state.push(`${count} ${count === 1 ? 'file' : 'files'}`);
-    if ($('[name="web_search"]', form).checked) state.push('Search allowed');
+    if ($('[name="web_search"]', form).checked) state.push('Web access allowed');
     summary.textContent = state.length ? `· ${state.join(' · ')}` : '';
     summary.hidden = state.length === 0;
   }

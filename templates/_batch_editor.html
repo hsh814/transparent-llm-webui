@@ -28,7 +28,7 @@
       {% else %}
       <section class="batch-tool-row" data-tool-key="{{ row.key }}" data-position="{{ row.position }}" data-user-message-id="{{ row.user_message_id }}" data-complete="{{ 'true' if row.complete else 'false' }}">
         <div class="batch-row-heading"><label><input type="checkbox" class="batch-include-tool" {% if row.complete %}checked{% else %}disabled{% endif %}> Reuse complete tool batch</label><span class="batch-tool-state" aria-live="polite"></span></div>
-        <p class="muted">Calls and results are read-only and kept together; only assistant Thinking is editable. Reuse never reruns a search. After a context or Thinking change, reuse requires your explicit choice.</p>
+        <p class="muted">Calls and results are read-only and kept together; only assistant Thinking is editable. Reuse never reruns a web tool. After a context or Thinking change, reuse requires your explicit choice.</p>
         <label class="batch-thinking-label" for="batch-tool-reasoning-{{ row.user_message_id }}-{{ row.event_indexes[0] }}">Tool-call Thinking — editable</label>
         <textarea id="batch-tool-reasoning-{{ row.user_message_id }}-{{ row.event_indexes[0] }}" class="batch-tool-reasoning" rows="3" {% if not row.complete %}disabled{% endif %}>{{ row.reasoning }}</textarea>
         <p class="muted">Thinking stays editable while this complete batch is unchecked. Editing it excludes this batch until you explicitly choose reuse again. Incomplete batches cannot be edited or reused.</p>
@@ -47,7 +47,7 @@
     <section class="batch-preview" aria-labelledby="batch-preview-title"><h3 id="batch-preview-title">Fork preview</h3><p id="batch-editor-summary" role="status" aria-live="polite"></p><ol id="batch-preview-list"></ol><p id="batch-send-note" class="muted"></p></section>
     <p id="batch-editor-error" class="error-text" role="alert" hidden></p>
     <footer class="batch-editor-actions">
-      {% if folder.type == 'chat' %}<label class="batch-search-permission"><input type="checkbox" name="web_search" value="true"> Allow fresh web search for Send <span class="muted">Off by default; reused results are not rerun.</span></label>{% endif %}
+      {% if folder.type == 'chat' %}<label class="batch-search-permission"><input type="checkbox" name="web_search" value="true"> Allow fresh web access for Send <span class="muted">Off by default; reused results are not rerun.</span></label>{% endif %}
       <div><button type="button" class="btn-mini batch-editor-cancel">Cancel</button><button type="submit" name="intent" value="save" class="btn">Save as fork</button><button type="submit" name="intent" value="send" id="batch-editor-send" class="btn" disabled>Save &amp; send</button></div>
     </footer>
   </form>

@@ -111,6 +111,20 @@ def web_search(query: str, max_results: int = 5) -> list[dict]:
     return results
 
 
+def web_fetch(url: str) -> dict:
+    """Retrieve provider-extracted page text; never contact the target URL locally."""
+    with httpx.Client(base_url=API_BASE, headers=_headers(), timeout=SEARCH_TIMEOUT) as client:
+        resp = client.post("/api/web_fetch", json={"url": url})
+        resp.raise_for_status()
+        data = resp.json()
+    if (not isinstance(data, dict) or data.get("error")
+            or not isinstance(data.get("title"), str) or not isinstance(data.get("content"), str)
+            or not isinstance(data.get("links"), list)
+            or any(not isinstance(link, str) for link in data["links"])):
+        raise ValueError("Invalid web fetch response from Ollama")
+    return {key: data[key] for key in ("title", "content", "links")}
+
+
 class ToolCallError(ValueError):
     """A safe, user-visible rejection of an incomplete or invalid tool request."""
 

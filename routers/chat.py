@@ -80,7 +80,7 @@ def send_message(
     if folder["type"] == "memo":
         raise HTTPException(403, "Use Save note in a memo folder.")
     if folder["type"] != "chat" and (files or web_search):
-        raise HTTPException(400, "Attachments and web search are available in Chat folders.")
+        raise HTTPException(400, "Attachments and web access are available in Chat folders.")
     text = content.strip()
     if not text and not files:
         raise HTTPException(400, "Write a message or attach an image or PDF first.")

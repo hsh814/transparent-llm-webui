@@ -22,6 +22,46 @@ def preview_stream(model, messages, params, *, tools=None):
         source = "\n".join(part["text"] for part in source if part["type"] == "text")
     completed = sum(message["role"] == "tool" for message in messages[user_index + 1:])
     budget_search = "[budget-search]" in source
+    fetch_only = "[fetch-only]" in source
+    fetch_search = "[fetch-search]" in source
+    fetch_missing = "[fetch-missing]" in source
+    if fetch_only or fetch_search or fetch_missing:
+        required = 2 if fetch_search else 1
+        if tools and completed < required:
+            if fetch_search and completed == 0:
+                name = "web_search"
+                arguments = {"query": "paper table figure evidence", "max_results": 1}
+                reasoning = "Find the paper URL with one focused search."
+            else:
+                name = "web_fetch"
+                url = "https://example.org/missing" if fetch_missing else "https://example.org/paper"
+                if fetch_search:
+                    search_result = next(
+                        message for message in messages[user_index + 1:]
+                        if message["role"] == "tool" and message.get("name") == "web_search"
+                    )
+                    url = json.loads(search_result["content"])["results"][0]["url"]
+                arguments = {"url": url}
+                reasoning = "Fetch the known paper URL for the specific detail missing from snippets."
+            time.sleep(0.4)
+            yield {"type": "reasoning", "text": reasoning}
+            yield {"type": "done", "finish_reason": "tool_calls", "tool_calls": [
+                {"id": f"{name}-{completed + 1}", "type": "function", "function": {
+                    "name": name, "arguments": json.dumps(arguments),
+                }},
+            ], "usage": {"prompt_tokens": 8, "completion_tokens": 4, "total_tokens": 12}}
+            return
+        answer = (
+            "The fetched paper reports 42 samples. Its methods section specifies two independent reviewers."
+            if completed >= required else "Web access was not offered, so I have no fetched paper evidence."
+        )
+        if fetch_missing and completed >= required:
+            outcome = json.loads(messages[-1]["content"])
+            assert outcome["status_code"] == 404 and outcome["executed"] is True
+            answer = "The requested page returned HTTP 404. I cannot verify its contents; the response can still finish."
+        yield {"type": "content", "text": answer}
+        yield {"type": "done", "usage": {"prompt_tokens": 12, "completion_tokens": 20, "total_tokens": 32}}
+        return
     correcting = "[invalid-search]" in source
     required = 2 if correcting or "[multi-search]" in source or "[two-round-search]" in source else 1
     if tools and "[no-search]" not in source and (budget_search or completed < required):
@@ -92,9 +132,40 @@ def preview_search(query, max_results=5):
              "content": "Table 1 reports 42 samples; Figure 1 compares the two methods."}]
 
 
+def preview_fetch(url):
+    if url == "https://example.org/missing":
+        time.sleep(0.4)
+        ollama.httpx.Response(404, request=ollama.httpx.Request(
+            "POST", "https://ollama.com/api/web_fetch",
+        )).raise_for_status()
+    if url != "https://example.org/paper":
+        raise AssertionError("The fetch preview expects the paper fixture URL.")
+    time.sleep(0.4)
+    return {
+        "title": "Paper with a table and figure",
+        "content": (
+            "Paper with a table and figure\n\n"
+            "Table 1 reports 42 samples; Figure 1 compares the two methods.\n\n"
+            "Methods\n"
+            "  Two independent reviewers assessed each sample.\n"
+            "  Agreement: 95% & confidence interval < 100%.\n\n"
+            "<script>window.unsafeFetchExecuted = true</script>\n"
+            "End of the full extracted paper."
+        ),
+        "links": [
+            "https://example.org/paper/supplement",
+            "http://example.org/paper/references",
+            "/relative/appendix",
+            "javascript:window.unsafeFetchLinkExecuted=true",
+            'data:text/html,<script>window.unsafeFetchLinkExecuted=true</script>',
+        ],
+    }
+
+
 ollama.list_models = lambda: ["gemma4:31b", "qwen3:32b", "gpt-oss:120b"]
 ollama.model_context_length = lambda model: 32768
 ollama.chat_stream = preview_stream
 ollama.web_search = preview_search
+ollama.web_fetch = preview_fetch
 
 from app import app  # noqa: E402 — the preview overrides are intentionally installed first.

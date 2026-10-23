@@ -112,12 +112,12 @@ input.title-input:hover, input.title-input:focus { border-bottom-color: var(--bo
 .tool-timeline + .message, .generation-progress { margin-top: 18px; }
 .tool-event.message { border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 9px; padding: 12px 14px; font-size: 12px; overflow-wrap: anywhere; background: var(--surface); }
 .tool-event.tool-result { border-left-color: #90a898; }
-.tool-event[data-event-status="failed"], .tool-event[data-event-status="rejected"] { border-left-color: var(--danger); }
+.tool-event[data-event-status="failed"], .tool-event[data-event-status="rejected"], .tool-event[data-event-status="unavailable"] { border-left-color: var(--danger); }
 .tool-event .message-meta { margin-bottom: 8px; }
-.tool-query { margin: 8px 0; font-size: 13px; }
-.tool-query span { font-weight: 550; }
+.tool-query, .tool-url { margin: 8px 0; font-size: 13px; overflow-wrap: anywhere; }
+.tool-query span, .tool-url span { font-weight: 550; }
 .tool-request + .tool-request { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); }
-.tool-arguments pre, .tool-thinking-source pre { white-space: pre-wrap; overflow-wrap: anywhere; margin-bottom: 0; }
+.tool-arguments pre, .tool-thinking-source pre, .fetched-content pre { white-space: pre-wrap; overflow-wrap: anywhere; margin-bottom: 0; }
 .included-trace-note, .legacy-search-note { padding: 10px 12px; border-radius: 7px; background: var(--accent-soft); font-size: 11px; }
 .retained-response-note { margin: 18px 0 12px; }
 .tool-safety-note { font-size: 10px; margin-bottom: 0; }
@@ -214,6 +214,7 @@ input.title-input:hover, input.title-input:focus { border-bottom-color: var(--bo
 .search-source { border-top: 1px solid var(--border); margin-top: 10px; padding-top: 8px; }
 .search-source h3 { margin: 0; font-size: 13px; }
 .source-url { color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.fetched-links { margin-top: 8px; overflow-wrap: anywhere; }
 .preparation-notice { padding: 12px; border: 1px solid var(--border); background: var(--accent-soft); border-radius: 8px; }
 .prompt-viewer > details, .prompt-message { margin: 18px 0; min-width: 0; }
 .prompt-image { margin: 12px 0; }

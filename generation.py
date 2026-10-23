@@ -5,6 +5,7 @@ import logging
 import threading
 import time
 from datetime import datetime, timezone
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -79,11 +80,11 @@ def _call_arguments(call: dict) -> tuple[str, dict]:
     return name, arguments
 
 
-class _InvalidSearchArguments(ollama.ToolCallError):
+class _InvalidToolArguments(ollama.ToolCallError):
     """A complete call whose arguments the model can correct."""
 
 
-def _search_arguments(job: dict, call: dict) -> tuple[str, int]:
+def _tool_arguments(job: dict, call: dict) -> dict:
     name, arguments = _call_arguments(call)
     if any(event.get("origin") == "legacy" and any(
         previous["id"] == call["id"] for previous in event["message"].get("tool_calls", [])
@@ -92,26 +93,48 @@ def _search_arguments(job: dict, call: dict) -> tuple[str, int]:
             "This unfinished legacy app search cannot resume automatically. "
             "Regenerate the response or fork before its search call."
         )
-    if name != "web_search":
+    if name not in ("web_search", "web_fetch"):
         raise ollama.ToolCallError("The model requested an unsupported tool. That tool was not executed.")
-    query = arguments.get("query")
-    max_results = arguments.get("max_results", 5)
     problems = []
-    if extra := set(arguments) - {"query", "max_results"}:
-        problems.append("Unsupported arguments: " + ", ".join(sorted(extra)) + ". Only query and max_results are allowed.")
-    if not isinstance(query, str) or not query.strip():
-        problems.append("query must be a nonempty string.")
-    if isinstance(max_results, bool) or not isinstance(max_results, int) or not 1 <= max_results <= 5:
-        problems.append(
-            "max_results must be an integer from 1 to 5 (maximum 5; default 5 if omitted); "
-            f"received {json.dumps(max_results, ensure_ascii=False)}."
-        )
+    if name == "web_search":
+        query = arguments.get("query")
+        max_results = arguments.get("max_results", 5)
+        if extra := set(arguments) - {"query", "max_results"}:
+            problems.append("Unsupported arguments: " + ", ".join(sorted(extra)) + ". Only query and max_results are allowed.")
+        if not isinstance(query, str) or not query.strip():
+            problems.append("query must be a nonempty string.")
+        if isinstance(max_results, bool) or not isinstance(max_results, int) or not 1 <= max_results <= 5:
+            problems.append(
+                "max_results must be an integer from 1 to 5 (this app's maximum is 5; default 5 if omitted); "
+                f"received {json.dumps(max_results, ensure_ascii=False)}."
+            )
+        validated = {"query": query, "max_results": max_results}
+    else:
+        url = arguments.get("url")
+        valid_url = False
+        if isinstance(url, str) and url and "\\" not in url and not any(
+                char.isspace() or ord(char) < 32 or ord(char) == 127 for char in url):
+            try:
+                parsed = urlsplit(url)
+                valid_url = (
+                    parsed.scheme in ("http", "https") and bool(parsed.hostname)
+                    and parsed.username is None and parsed.password is None
+                    and (parsed.port is None or 1 <= parsed.port <= 65535)
+                )
+            except ValueError:
+                pass
+        if not valid_url:
+            problems.append("url must be an absolute HTTP(S) URL with a hostname and valid port, "
+                            "without credentials, backslashes, whitespace, or control characters.")
+        if set(arguments) - {"url"}:
+            problems.append("Only the url argument is allowed for web_fetch.")
+        validated = {"url": url}
     if problems:
-        raise _InvalidSearchArguments(
-            "Web search was not executed. " + " ".join(problems)
-            + " Correct the arguments and call web_search again with a new tool call ID."
+        raise _InvalidToolArguments(
+            f"{name} was not executed. " + " ".join(problems)
+            + f" Correct the arguments and call {name} again with a new tool call ID."
         )
-    return query, max_results
+    return validated
 
 
 def _execute_tools(job: dict) -> dict | None:
@@ -126,19 +149,20 @@ def _execute_tools(job: dict) -> dict | None:
         rejection = None
         error_type = "invalid_arguments"
         try:
-            arguments = _search_arguments(job, call)
-        except _InvalidSearchArguments as exc:
+            arguments = _tool_arguments(job, call)
+        except _InvalidToolArguments as exc:
             rejection = str(exc)
         if call["id"] not in eligible:
             rejection = (
-                f"Web search was not executed: the budget of {MAX_TOOL_CALLS} calls for this response "
-                "is exhausted. Do not retry this call. Answer using the evidence already gathered "
-                "and state any uncertainty; no further searches are available."
+                f"{call['function']['name']} was not executed: the shared budget of {MAX_TOOL_CALLS} "
+                "web-tool calls for this response is exhausted. Do not retry this call. "
+                "Answer using the evidence already gathered and state any uncertainty; "
+                "no further web search or fetch calls are available."
             )
             error_type = "search_budget_exhausted"
         elif not permitted:
             raise ollama.ToolCallError(
-                "Web search is not allowed for this response. Enable Allow web search and retry, "
+                "Web access is not allowed for this response. Enable Allow web search & fetch and retry, "
                 "or fork before the tool call."
             )
         validated.append((call, arguments, rejection, error_type))
@@ -151,25 +175,43 @@ def _execute_tools(job: dict) -> dict | None:
                 return None
             continue
         assert arguments is not None  # Preflight produced either validated arguments or a rejection.
-        query, max_results = arguments
+        name = call["function"]["name"]
         if not db.start_tool(job, call["id"]):
             return None
         job = _reload(job)
         if job is None:
             return None
+        status = "completed"
         try:
-            results = ollama.web_search(query, max_results=max_results)
+            if name == "web_search":
+                result = {**arguments, "results": ollama.web_search(
+                    arguments["query"], max_results=arguments["max_results"],
+                )}
+            else:
+                result = {**arguments, **ollama.web_fetch(arguments["url"])}
         except Exception as exc:
-            message = "Web search failed. " + error_message(exc)
-            if not db.finish_tool(job, call["id"], {"error": message}, failed=True):
-                return None
-            job = _reload(job)
-            if job is None:
-                return None
-            raise ollama.ToolCallError(message) from exc
-        result = {"query": query, "max_results": max_results, "results": results,
-                  "fetched_at": datetime.now(timezone.utc).isoformat()}
-        if not db.finish_tool(job, call["id"], result):
+            if name == "web_fetch" and isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 404:
+                status = "unavailable"
+                result = {
+                    "url": arguments["url"], "error_type": "http_not_found",
+                    "status_code": 404, "executed": True,
+                    "error": (
+                        "Ollama returned HTTP 404 (Not Found) while fetching this URL; "
+                        "no page content was retrieved. Use the evidence already gathered or choose "
+                        "another relevant URL. Do not repeat this unchanged URL. "
+                        "If the available evidence is insufficient, state the uncertainty."
+                    ),
+                }
+            else:
+                message = ("Web fetch failed. " if name == "web_fetch" else "Web search failed. ") + error_message(exc)
+                if not db.finish_tool(job, call["id"], {"error": message}, status="failed"):
+                    return None
+                job = _reload(job)
+                if job is None:
+                    return None
+                raise ollama.ToolCallError(message) from exc
+        result["attempted_at" if status == "unavailable" else "fetched_at"] = datetime.now(timezone.utc).isoformat()
+        if not db.finish_tool(job, call["id"], result, status=status):
             return None
         job = _reload(job)
         if job is None:
@@ -244,8 +286,8 @@ def _generate(job: dict) -> None:
                         return
                     job = resolved
                     raise ollama.ToolCallError(
-                        "The model requested tools after web search was disabled for the final answer. "
-                        "No additional searches were executed. Retry to request the final answer again."
+                        "The model requested tools after web access was disabled for the final answer. "
+                        "No additional web requests were executed. Retry to request the final answer again."
                     )
                 continue
             if not (content or reasoning):

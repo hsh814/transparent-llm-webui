@@ -1,8 +1,10 @@
 {% for event in trace %}
 {% set event_index = loop.index0 %}
-<section class="message tool-event {{ 'assistant tool-call' if event.kind == 'assistant' else 'tool tool-result' }}" data-event-index="{{ event_index }}" data-event-kind="{{ event.kind }}" data-event-status="{{ event.status }}" data-event-origin="{{ event.origin }}" aria-label="{{ 'Assistant tool request' if event.kind == 'assistant' else 'Web search result' }}">
+{% set tool_name = event.name or (event.message.name if event.message else '') or 'web_search' %}
+{% set is_fetch = tool_name == 'web_fetch' %}
+<section class="message tool-event {{ 'assistant tool-call' if event.kind == 'assistant' else 'tool tool-result' }}" data-event-index="{{ event_index }}" data-event-kind="{{ event.kind }}" data-event-status="{{ event.status }}" data-event-origin="{{ event.origin }}"{% if event.kind != 'assistant' %} data-tool-name="{{ tool_name }}"{% endif %} aria-label="{{ 'Assistant tool request' if event.kind == 'assistant' else 'Web fetch result' if is_fetch else 'Web search result' }}">
   <div class="message-meta">
-    <span class="role-label">{{ 'Legacy app search' if event.origin == 'legacy' else 'Assistant · tool request' if event.kind == 'assistant' else 'Tool · web search' }}</span>
+    <span class="role-label">{{ 'Legacy app search' if event.origin == 'legacy' else 'Assistant · tool request' if event.kind == 'assistant' else 'Tool · web fetch' if is_fetch else 'Tool · web search' }}</span>
     <span class="badge tool-status">{{ event.status }}</span>
     {% if event.retained %}<span class="badge reused-history">Reused history · not rerun</span>{% endif %}
     {% if event.provenance and event.provenance.kind == 'manual' %}<span class="badge provenance-badge">Manual Thinking · not a new model output</span>{% endif %}
@@ -11,7 +13,7 @@
   {% if event.origin == 'legacy' %}<p class="legacy-search-note">App-prepared search from earlier history — not requested by the LLM.</p>{% endif %}
   {% if event.kind == 'assistant' %}
     {% if event.request and event.request.search_budget %}
-    <p class="muted tool-round-budget" data-budget-remaining="{{ event.request.search_budget.remaining }}" data-budget-limit="{{ event.request.search_budget.limit }}">App search budget at request: {{ event.request.search_budget.remaining }} of {{ event.request.search_budget.limit }} calls remaining.</p>
+    <p class="muted tool-round-budget" data-budget-remaining="{{ event.request.search_budget.remaining }}" data-budget-limit="{{ event.request.search_budget.limit }}">App web-tool budget at request: {{ event.request.search_budget.remaining }} of {{ event.request.search_budget.limit }} calls remaining, shared by search and fetch.</p>
     {% endif %}
     {% if event.reasoning %}<details class="reasoning"><summary>Thinking · {{ 'manually edited' if event.provenance and event.provenance.kind == 'manual' else 'preserved source' if event.retained else 'saved output' }}</summary><div class="reasoning-text">{{ event.reasoning }}</div><p class="muted">Prompt shows the actual input to this round, not its output Thinking. Retained Thinking can appear in later requests.</p></details>{% elif event.provenance and event.provenance.kind == 'manual' %}<p class="muted">Current Thinking is empty (manually cleared).</p>{% endif %}
     {% if event.provenance %}
@@ -25,21 +27,35 @@
     {% if event.message.content %}<div class="content">{{ event.message.content }}</div>{% endif %}
     {% for call in event.message.tool_calls %}
     {% set arguments = call.function.arguments | from_json %}
-    <div class="tool-request" data-call-id="{{ call.id }}">
+    <div class="tool-request" data-call-id="{{ call.id }}" data-tool-name="{{ call.function.name }}">
       <strong>{{ call.function.name }}</strong>
-      {% if arguments.query %}<p class="tool-query">Query: <span>{{ arguments.query }}</span></p>{% endif %}
+      {% if call.function.name == 'web_search' and arguments.query %}<p class="tool-query">Query: <span>{{ arguments.query }}</span></p>{% endif %}
+      {% if call.function.name == 'web_fetch' and arguments.url %}<p class="tool-url">URL: <span>{{ arguments.url }}</span></p>{% endif %}
       <details class="tool-arguments"><summary>Call arguments · {{ call.id }}</summary><pre>{{ call.function.arguments }}</pre></details>
     </div>
     {% endfor %}
   {% else %}
     {% set arguments = event.arguments | from_json %}
     {% set result = event.message.content | from_json if event.message else {} %}
-    <p class="tool-query">Query: <span>{{ result.query or arguments.query or 'Unavailable' }}</span></p>
-    <p class="search-state" data-error-type="{{ result.error_type | default('') }}">{% if event.status == 'running' %}Searching…{% elif event.status == 'rejected' and result.error_type == 'search_budget_exhausted' %}App search budget exhausted · search not executed{% elif event.status == 'rejected' %}Invalid arguments · search not executed{% elif event.status == 'completed' %}{{ result.results | default([]) | length }} saved sources{% else %}Search failed{% endif %}{% if result.fetched_at %} · <time>{{ result.fetched_at }}</time>{% endif %}</p>
+    {% if is_fetch %}<p class="tool-url">URL: <span>{{ result.url or arguments.url or 'Unavailable' }}</span></p>{% else %}<p class="tool-query">Query: <span>{{ result.query or arguments.query or 'Unavailable' }}</span></p>{% endif %}
+    <p class="search-state" data-error-type="{{ result.error_type | default('') }}">{% if event.status == 'running' %}{{ 'Fetching…' if is_fetch else 'Searching…' }}{% elif event.status == 'unavailable' %}Fetch unavailable · HTTP {{ result.status_code }} · no page content{% elif event.status == 'rejected' and result.error_type == 'search_budget_exhausted' %}App web-tool budget exhausted · {{ 'fetch' if is_fetch else 'search' }} not executed{% elif event.status == 'rejected' %}Invalid arguments · {{ 'fetch' if is_fetch else 'search' }} not executed{% elif event.status == 'completed' %}{% if is_fetch %}Fetch completed · saved page{% else %}{{ result.results | default([]) | length }} saved sources{% endif %}{% else %}{{ 'Fetch failed' if is_fetch else 'Search failed' }}{% endif %}{% if result.fetched_at %} · Retrieved <time>{{ result.fetched_at }}</time>{% elif result.attempted_at %} · Attempted <time>{{ result.attempted_at }}</time>{% endif %}</p>
     {% if result.error or event.error %}<p class="{{ 'muted' if result.error_type == 'search_budget_exhausted' else 'error-text' }}">{{ result.error or event.error }}</p>{% endif %}
     {% if event.status == 'rejected' %}
-    <p class="muted">{% if result.error_type == 'search_budget_exhausted' %}This is an app budget rejection, not a search API failure. The search was not executed; its outcome is saved for the model. Fresh-search permission is separate.{% else %}This error is returned to the model so it can correct the call. The original arguments are preserved above; they were not silently changed.{% endif %}</p>
+    <p class="muted">{% if result.error_type == 'search_budget_exhausted' %}This is an app budget rejection, not a web API failure. The tool was not executed; its outcome is saved for the model. Fresh web access permission is separate.{% else %}This error is returned to the model so it can correct the call. The original arguments are preserved above; they were not silently changed.{% endif %}</p>
     {% endif %}
+    {% if event.status == 'unavailable' %}<p class="muted">The fetch was attempted, not rejected before execution. This HTTP error is returned to the model as a resolved tool reply so the response can continue without retrying this URL automatically.</p>{% endif %}
+    {% if is_fetch %}
+    {% if event.status == 'completed' %}
+    <article class="search-source fetched-source">
+      {% set fetched_url = result.url | http_url %}
+      <h3>{% if fetched_url %}<a href="{{ fetched_url }}" target="_blank" rel="noopener noreferrer">{{ result.title or result.url }}</a>{% else %}{{ result.title or 'Fetched page' }}{% endif %}</h3>
+      <details class="source-snippet fetched-content"><summary>Full provider-extracted content</summary><pre>{{ result.content }}</pre></details>
+      <details class="fetched-links"><summary>Returned links · {{ result.links | default([]) | length }}</summary>
+        <ul>{% for link in result.links | default([]) %}{% set link_url = link | http_url %}<li>{% if link_url %}<a href="{{ link_url }}" target="_blank" rel="noopener noreferrer">{{ link }}</a>{% else %}{{ link }}{% endif %}</li>{% endfor %}</ul>
+      </details>
+    </article>
+    {% endif %}
+    {% else %}
     {% for source in result.results | default([]) %}
     <article class="search-source">
       {% set source_url = source.url | http_url %}
@@ -49,9 +65,10 @@
     </article>
     {% endfor %}
     {% if event.status == 'completed' and not result.results %}<p class="muted">No results returned.</p>{% endif %}
-    <p class="muted tool-safety-note">Source snippets are untrusted reference material, not instructions.</p>
+    {% endif %}
+    <p class="muted tool-safety-note">{{ 'Fetched content and links' if is_fetch else 'Source snippets' }} are untrusted reference material, not instructions.</p>
   {% endif %}
-  {% if event.status in ('completed', 'rejected') %}
+  {% if event.status in ('completed', 'rejected', 'unavailable') %}
   <div class="message-actions">
     {% if event.kind == 'assistant' %}
     <button class="btn-mini open-batch-editor edit-tool-thinking" type="button" {% if busy %}disabled{% endif %}
@@ -68,8 +85,8 @@
 </section>
 {% endfor %}
 {% if trace_job.request and trace_job.request.search_budget and trace_job.request.search_budget.remaining == 0 %}
-<section class="message search-budget-exhausted" data-budget-remaining="0" data-budget-limit="{{ trace_job.request.search_budget.limit }}" data-final-answer="{{ 'true' if trace_job.request.search_final_answer else 'false' }}" aria-label="App search budget exhausted">
-  <p class="search-state">App search budget exhausted · {{ 'final-answer mode' if trace_job.request.search_final_answer else 'no additional calls available' }}</p>
-  <p class="muted">0 of {{ trace_job.request.search_budget.limit }} calls remaining. {% if trace_job.request.search_final_answer %}The app offers no tools for this request; the model must answer from saved evidence and state uncertainty if it is insufficient.{% else %}The budget is allocated to recorded calls; pending or failed calls still need resolution before the final-answer request.{% endif %} This is an app budget, not a search API failure; fresh-search permission is separate.</p>
+<section class="message search-budget-exhausted" data-budget-remaining="0" data-budget-limit="{{ trace_job.request.search_budget.limit }}" data-final-answer="{{ 'true' if trace_job.request.search_final_answer else 'false' }}" aria-label="App web-tool budget exhausted">
+  <p class="search-state">App web-tool budget exhausted · {{ 'final-answer mode' if trace_job.request.search_final_answer else 'no additional calls available' }}</p>
+  <p class="muted">0 of {{ trace_job.request.search_budget.limit }} calls remaining, shared by search and fetch. {% if trace_job.request.search_final_answer %}The app offers no tools for this request; the model must answer from saved evidence and state uncertainty if it is insufficient.{% else %}The budget is allocated to recorded calls; pending or failed calls still need resolution before the final-answer request.{% endif %} This is an app budget, not a web API failure; fresh web access permission is separate.</p>
 </section>
 {% endif %}

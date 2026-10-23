@@ -945,7 +945,7 @@ def request_response(session_id: int, user_message_id: int, *, web_search: bool 
         ).fetchone() is None:
             _new_generation(conn, session, folder, rows[-1], rows)
         if web_search and folder["type"] != "chat":
-            raise ValueError("Web search is only available in Chat folders.")
+            raise ValueError("Web access is only available in Chat folders.")
         _set_permission(conn, user_message_id, web_search)
         return _queue_generation(conn, session_id, user_message_id)
 
@@ -987,7 +987,7 @@ def regenerate_response(session_id: int, assistant_message_id: int, *, web_searc
             user_id = variant["user_message_id"]
             _select_variant(conn, session_id, user_id, assistant_message_id)
         if web_search and folder["type"] != "chat":
-            raise ValueError("Web search is only available in Chat folders.")
+            raise ValueError("Web access is only available in Chat folders.")
         store = payloads.Store(conn)
         current = conn.execute("SELECT * FROM generations WHERE user_message_id = ?", (user_id,)).fetchone()
         base = _enrich_base_reasoning(
@@ -1159,7 +1159,7 @@ def _event_snapshot(conn: sqlite3.Connection, session_id: int, user_id: int,
         (session_id, user_id),
     ).fetchone()
     if row is None or not trace_id or type(event_index) is not int or event_index < 0:
-        raise ValueError("Search event not found.")
+        raise ValueError("Tool event not found.")
     job = dict(row)
     variant = conn.execute("SELECT * FROM response_variants WHERE assistant_message_id = ?",
                            (job["assistant_message_id"],)).fetchone()
@@ -1167,10 +1167,10 @@ def _event_snapshot(conn: sqlite3.Connection, session_id: int, user_id: int,
         for key in ("request_id", "base_request_id", "trace_id"):
             job[key] = variant[key]
     elif job["trace_id"] != trace_id or (variant and job["status"] == "completed"):
-        raise ValueError("This search history changed. Reload before choosing an event.")
+        raise ValueError("This tool history changed. Reload before choosing an event.")
     trace = payloads.load(conn, trace_id)
-    if event_index >= len(trace) or trace[event_index]["status"] not in ("completed", "rejected"):
-        raise ValueError("Only completed or rejected search events can be selected.")
+    if event_index >= len(trace) or trace[event_index]["status"] not in ("completed", "rejected", "unavailable"):
+        raise ValueError("Only resolved tool events can be selected.")
     return job, trace
 
 
@@ -1277,7 +1277,7 @@ def _edit_snapshot(conn: sqlite3.Connection, session_id: int) -> dict:
                     result = matches[0]
                     message = result.get("message") or {}
                     complete = complete and (
-                        result.get("kind") == "tool" and result.get("status") in ("completed", "rejected", "failed")
+                        result.get("kind") == "tool" and result.get("status") in ("completed", "rejected", "unavailable", "failed")
                         and message.get("role") == "tool" and message.get("tool_call_id") == call_id
                         and isinstance(message.get("content"), str)
                     )
@@ -1326,7 +1326,7 @@ def save_edited_fork(session_id: int, draft: dict, *, send: bool = False,
                      web_search: bool = False) -> dict:
     """Validate the entire draft, then atomically clone it and optionally queue one input."""
     if type(send) is not bool or type(web_search) is not bool:
-        raise ValueError("Send and web search permissions must be booleans.")
+        raise ValueError("Send and web access permissions must be booleans.")
     with _lock, _get_conn() as conn:
         # The reservation precedes every read so another connection cannot change
         # the source between revision validation and the atomic fork commit.
@@ -1396,7 +1396,7 @@ def save_edited_fork(session_id: int, draft: dict, *, send: bool = False,
         if send and (folder["type"] == "memo" or not kept or kept[-1]["role"] != "user"):
             raise ValueError("Save & send requires a final included user message in a model conversation.")
         if web_search and (not send or folder["type"] != "chat"):
-            raise ValueError("Web search requires explicit Save & send in a Chat folder.")
+            raise ValueError("Web access requires explicit Save & send in a Chat folder.")
 
         # No inserts or content-addressed allocations occur above this boundary.
         source = snapshot["session"]
@@ -1553,10 +1553,10 @@ def fork_session(session_id: int, message_id: int, *, event_index: int | None = 
         event_trace = None
         if event_index is not None:
             if rows[boundary]["role"] != "user":
-                raise ValueError("Search event forks must use their user message.")
+                raise ValueError("Tool event forks must use their user message.")
             event_job, event_trace = _event_snapshot(conn, session_id, message_id, event_index, trace_id)
         elif trace_id is not None:
-            raise ValueError("A search history requires an event boundary.")
+            raise ValueError("Tool history requires an event boundary.")
         prefix = rows[:boundary + 1]
         cur = conn.execute(
             "INSERT INTO sessions (folder_id, title, auto_title, model, params_json, params_updated_at)"
@@ -1652,7 +1652,7 @@ def enqueue_turns(session_id: int, chunks: list[str], *, attachments: list[dict]
     """Atomically save input and the exact request, before any network work."""
     attachments = attachments or []
     if (attachments or web_search) and len(chunks) != 1:
-        raise ValueError("Attachments and web search require a single Chat message.")
+        raise ValueError("Attachments and web access require a single Chat message.")
     with _lock, _get_conn() as conn:
         session = conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
         if session is None:
@@ -1661,7 +1661,7 @@ def enqueue_turns(session_id: int, chunks: list[str], *, attachments: list[dict]
         if folder["type"] == "memo":
             raise ValueError("This folder stores notes")
         if folder["type"] != "chat" and (attachments or web_search):
-            raise ValueError("Attachments and web search are only available in Chat folders.")
+            raise ValueError("Attachments and web access are only available in Chat folders.")
         if conn.execute(
             "SELECT 1 FROM generations WHERE session_id = ? AND status IN ('queued', 'running')",
             (session_id,),
@@ -1880,7 +1880,7 @@ def start_tool(job: dict, call_id: str) -> bool:
 
 
 def reject_tool(job: dict, call_id: str, error: str, *, error_type: str = "invalid_arguments") -> bool:
-    """Resolve an unexecuted call without recording a running search or contacting it."""
+    """Resolve an unexecuted call without recording a running tool or contacting it."""
     with _lock, _get_conn() as conn:
         row = _running_job(conn, job)
         if row is None:
@@ -1910,7 +1910,10 @@ def reject_tool(job: dict, call_id: str, error: str, *, error_type: str = "inval
         return True
 
 
-def finish_tool(job: dict, call_id: str, result: dict, *, failed: bool = False) -> bool:
+def finish_tool(job: dict, call_id: str, result: dict, *, status: str = "completed") -> bool:
+    """Save a success, resolved retrieval error, or failure requiring explicit Retry."""
+    if status not in ("completed", "unavailable", "failed"):
+        raise ValueError("Invalid finished tool status.")
     with _lock, _get_conn() as conn:
         row = _running_job(conn, job)
         if row is None:
@@ -1922,12 +1925,12 @@ def finish_tool(job: dict, call_id: str, result: dict, *, failed: bool = False) 
         if event is None:
             return False
         event.update(
-            status="failed" if failed else "completed",
+            status=status,
             message={"role": "tool", "tool_call_id": call_id, "name": event["name"],
                      "content": json.dumps(result, ensure_ascii=False)},
         )
-        if failed:
-            event["error"] = result.get("error", "Search failed.")
+        if status != "completed":
+            event["error"] = result.get("error", "Web tool failed.")
         else:
             event.pop("error", None)
         _save_trace(conn, row, store, trace)
@@ -2016,7 +2019,7 @@ def retry_generations(session_id: int, *, web_search: bool | None = None) -> boo
     with _lock, _get_conn() as conn:
         _, folder = _response_session(conn, session_id)
         if web_search and folder["type"] != "chat":
-            raise ValueError("Web search is only available in Chat folders.")
+            raise ValueError("Web access is only available in Chat folders.")
         if conn.execute(
             "SELECT 1 FROM generations WHERE session_id = ? AND status IN ('queued', 'running')", (session_id,)
         ).fetchone():

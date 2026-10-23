@@ -77,6 +77,18 @@ def search_call(query="model-selected query", call_id="search-1", max_results=2)
     }}
 
 
+def fetch_call(url="https://example.org/paper", call_id="fetch-1"):
+    return {"id": call_id, "type": "function", "function": {
+        "name": "web_fetch", "arguments": json.dumps({"url": url}),
+    }}
+
+
+def web_http_error(status, path="/api/web_fetch"):
+    request = httpx.Request("POST", f"https://ollama.com{path}")
+    response = httpx.Response(status, request=request, text="Private provider error body")
+    return httpx.HTTPStatusError("Private provider exception", request=request, response=response)
+
+
 def search_stream(model, messages, params, *, tools=None):
     if messages[-1]["role"] != "tool":
         yield {"type": "content", "text": "Checking the sources."}
@@ -219,6 +231,541 @@ class AppTests(unittest.TestCase):
                        "reasoning": group["reasoning"]} for group in snapshot["tool_groups"]],
         }
         return snapshot, draft
+
+    def test_direct_fetch_and_search_then_fetch_preserve_evidence_and_thinking(self):
+        url = "https://example.org/paper?version=2"
+        evidence = {"title": "Paper <title>", "content": "Full extracted evidence\n  <script>not markup</script>\n" * 800,
+                    "links": ["https://example.org/methods", "/relative", "javascript:alert(1)"]}
+        search_results = [{"title": "Paper", "url": url, "content": "A short discovery snippet"}]
+        for discover in (False, True):
+            with self.subTest(discover=discover):
+                sid = db.create_session(self.folder["id"], model="test-model")["id"]
+                question = "Read the known paper" if not discover else "Find and read the paper"
+                self.client.post(f"/sessions/{sid}/send", data={"content": question, "web_search": "true"})
+                base = db.list_generations(sid)[0]["base_request"]
+                requests = []
+
+                def read_paper(model, messages, params, *, tools=None):
+                    requests.append(json.loads(json.dumps({"messages": messages, "tools": tools})))
+                    outcomes = [message for message in messages if message["role"] == "tool"]
+                    if discover and not outcomes:
+                        call = search_call("paper discovery", "discover", 1)
+                    elif not any(message["name"] == "web_fetch" for message in outcomes):
+                        call = fetch_call(url)
+                    else:
+                        yield {"type": "reasoning", "text": "Answer from the saved page"}
+                        yield {"type": "content", "text": "The paper supports the answer."}
+                        yield {"type": "done"}
+                        return
+                    yield {"type": "reasoning", "text": f"Thinking before {call['function']['name']}"}
+                    yield {"type": "done", "finish_reason": "tool_calls", "tool_calls": [call]}
+
+                with patch.object(ollama, "chat_stream", side_effect=read_paper), \
+                        patch.object(ollama, "web_search", return_value=search_results) as search, \
+                        patch.object(ollama, "web_fetch", return_value=evidence) as fetch:
+                    generation._generate(db.claim_generation(sid))
+                    fetch.assert_called_once_with(url)
+                    if discover:
+                        search.assert_called_once_with("paper discovery", max_results=1)
+                    else:
+                        search.assert_not_called()
+                saved = db.list_generations(sid)[0]
+                self.assertEqual(saved["status"], "completed")
+                self.assertEqual(saved["base_request"], base)
+                self.assertEqual(saved["messages"], requests[-1]["messages"])
+                expected_names = ["web_search", "web_fetch"] if discover else ["web_fetch"]
+                outcomes = [event for event in saved["trace"] if event["kind"] == "tool"]
+                self.assertEqual([event["name"] for event in outcomes], expected_names)
+                for index, event in enumerate(event for event in saved["trace"] if event["kind"] == "assistant"):
+                    self.assertEqual(event["request"]["messages"], requests[index]["messages"])
+                    self.assertEqual(event["request"]["tools"], requests[index]["tools"])
+                    self.assertEqual([tool["function"]["name"] for tool in requests[index]["tools"]],
+                                     ["web_search", "web_fetch"])
+                    call = event["message"]["tool_calls"][0]
+                    self.assertEqual(outcomes[index]["message"]["tool_call_id"], call["id"])
+                    self.assertEqual(outcomes[index]["message"]["name"], call["function"]["name"])
+                fetched = outcomes[-1]
+                self.assertEqual(fetched["status"], "completed")
+                result = json.loads(fetched["message"]["content"])
+                self.assertEqual(set(result), {"url", "title", "content", "links", "fetched_at"})
+                self.assertEqual({key: result[key] for key in evidence}, evidence)
+                self.assertEqual(result["url"], url)
+                self.assertIsInstance(result["fetched_at"], str)
+                self.assertEqual([message["reasoning"] for message in saved["messages"]
+                                  if message["role"] == "assistant"],
+                                 [f"Thinking before {name}" for name in expected_names])
+                prompt = self.client.get(f'/sessions/{sid}/messages/{saved["assistant_message_id"]}/prompt')
+                self.assertEqual(self.prompt_messages(prompt), requests[-1]["messages"])
+                self.assertEqual(db.visible_messages(sid)[0]["content"], question)
+                page = self.client.get(f"/?session={sid}")
+                self.assertEqual(page.status_code, 200)
+                self.assertIn(evidence["content"], unescape(page.text))
+                self.assertNotIn("<script>not markup</script>", page.text)
+                self.assertIn('href="https://example.org/methods"', page.text)
+                self.assertNotIn('href="javascript:alert(1)"', page.text)
+                self.client.post(f"/sessions/{sid}/send", data={"content": "Explain the evidence"})
+                followup = db.list_generations(sid)[-1]
+                self.assertEqual([message["content"] for message in followup["messages"]
+                                  if message["role"] == "user"], [question, "Explain the evidence"])
+                self.assertEqual([message for message in followup["messages"] if message["role"] == "tool"],
+                                 [event["message"] for event in outcomes])
+                self.assertEqual([message["reasoning"] for message in followup["messages"]
+                                  if message["role"] == "assistant"],
+                                 [f"Thinking before {name}" for name in expected_names] +
+                                 ["Answer from the saved page"])
+
+    def test_invalid_fetch_urls_recover_without_executing_rejected_calls(self):
+        invalid_arguments = [
+            {}, {"url": None}, {"url": 4}, {"url": ""}, {"url": "   "},
+            {"url": "example.org/paper"}, {"url": "//example.org/paper"},
+            {"url": "ftp://example.org/paper"}, {"url": "https:///paper"},
+            {"url": "https://user:secret@example.org/paper"}, {"url": "https://example.org:bad/paper"},
+            {"url": "https://example.org:65536/paper"}, {"url": "https://exa mple.org/paper"},
+            {"url": "https://example.org/a\nb"}, {"url": "https://example.org/a\tb"},
+            {"url": "https://example.org/a\x00b"}, {"url": "https://example.org\\@other.test/paper"},
+            {"url": "https://example.org/paper", "query": "unexpected"},
+        ]
+        for arguments in invalid_arguments:
+            with self.subTest(arguments=arguments):
+                sid = db.create_session(self.folder["id"], model="test-model")["id"]
+                self.client.post(f"/sessions/{sid}/send", data={"content": "Read the paper", "web_search": "true"})
+                bad = fetch_call(call_id="bad-fetch")
+                bad["function"]["arguments"] = json.dumps(arguments)
+
+                def correct_url(model, messages, params, *, tools=None):
+                    outcomes = [message for message in messages if message["role"] == "tool"]
+                    if not outcomes:
+                        call = bad
+                    elif len(outcomes) == 1:
+                        self.assertEqual(outcomes[0]["name"], "web_fetch")
+                        error = json.loads(outcomes[0]["content"])
+                        self.assertEqual(error["error_type"], "invalid_arguments")
+                        self.assertIs(error["executed"], False)
+                        fetch.assert_not_called()
+                        call = fetch_call(call_id="fixed-fetch")
+                    else:
+                        yield {"type": "content", "text": "Recovered using the valid URL"}
+                        yield {"type": "done"}
+                        return
+                    yield {"type": "done", "finish_reason": "tool_calls", "tool_calls": [call]}
+
+                with patch.object(ollama, "chat_stream", side_effect=correct_url), \
+                        patch.object(ollama, "web_search") as search, \
+                        patch.object(ollama, "web_fetch", return_value={"title": "Paper", "content": "Evidence",
+                                                                      "links": []}) as fetch, \
+                        patch.object(db, "start_tool", wraps=db.start_tool) as started:
+                    generation._generate(db.claim_generation(sid))
+                    search.assert_not_called()
+                    fetch.assert_called_once_with("https://example.org/paper")
+                    self.assertEqual([call.args[1] for call in started.call_args_list], ["fixed-fetch"])
+                saved = db.list_generations(sid)[0]
+                self.assertEqual(saved["status"], "completed")
+                self.assertEqual([event["status"] for event in saved["trace"]],
+                                 ["completed", "rejected", "completed", "completed"])
+                self.assertEqual(saved["trace"][0]["message"]["tool_calls"], [bad])
+                self.assertEqual(saved["request"]["search_budget"], {"limit": 8, "remaining": 6})
+
+    def test_fetch_respects_shared_permission_and_translation_boundaries(self):
+        for mode in ("chat", "translation"):
+            with self.subTest(mode=mode):
+                folder = db.create_folder("Permission boundary", "", mode)
+                sid = db.create_session(folder["id"], model="test-model")["id"]
+                self.client.post(f"/sessions/{sid}/send", data={"content": "A normal question"})
+
+                def unpermitted_fetch(model, messages, params, *, tools=None):
+                    self.assertEqual(tools, [])
+                    yield {"type": "done", "finish_reason": "tool_calls",
+                           "tool_calls": [search_call(), fetch_call()]}
+
+                with patch.object(ollama, "chat_stream", side_effect=unpermitted_fetch) as model, \
+                        patch.object(ollama, "web_search") as search, patch.object(ollama, "web_fetch") as fetch:
+                    generation._generate(db.claim_generation(sid))
+                    self.assertEqual(model.call_count, 1)
+                    self.assertEqual(model.call_args.kwargs["tools"], [])
+                    search.assert_not_called()
+                    fetch.assert_not_called()
+                self.assertEqual(db.list_generations(sid)[0]["status"], "failed")
+                self.assertEqual(db.visible_messages(sid)[0]["content"], "A normal question")
+                if mode == "translation":
+                    with self.assertRaises(ValueError):
+                        db.retry_generations(sid, web_search=True)
+
+    def test_mixed_webtools_share_one_budget_including_invalid_fetches(self):
+        self.client.post(f"/sessions/{self.sid}/send", data={"content": "Compare evidence", "web_search": "true"})
+        base = db.list_generations(self.sid)[0]["base_request"]
+        calls = [search_call(f"query {index}", f"call-{index}", 1) if index % 2 == 0
+                 else fetch_call(f"https://example.org/page/{index}", f"call-{index}") for index in range(10)]
+        calls[3] = fetch_call("not an absolute URL", "call-3")
+        requests = []
+
+        def oversized_mixed_batch(model, messages, params, *, tools=None):
+            requests.append(json.loads(json.dumps({"messages": messages, "tools": tools})))
+            if not any(message["role"] == "tool" for message in messages):
+                yield {"type": "done", "finish_reason": "tool_calls", "tool_calls": calls}
+            else:
+                self.assertEqual(tools, [])
+                self.assertEqual(messages[-1]["role"], "system")
+                yield {"type": "content", "text": "Answer limited to the gathered evidence"}
+                yield {"type": "done"}
+
+        with patch.object(ollama, "chat_stream", side_effect=oversized_mixed_batch), \
+                patch.object(ollama, "web_search", return_value=[]) as search, \
+                patch.object(ollama, "web_fetch", return_value={"title": "Page", "content": "Full page",
+                                                              "links": []}) as fetch:
+            generation._generate(db.claim_generation(self.sid))
+            self.assertEqual([call.args[0] for call in search.call_args_list],
+                             ["query 0", "query 2", "query 4", "query 6"])
+            self.assertEqual([call.args[0] for call in fetch.call_args_list],
+                             ["https://example.org/page/1", "https://example.org/page/5",
+                              "https://example.org/page/7"])
+        saved = db.list_generations(self.sid)[0]
+        self.assertEqual(saved["status"], "completed")
+        self.assertEqual(saved["base_request"], base)
+        self.assertEqual(saved["request"]["search_budget"], {"limit": 8, "remaining": 0})
+        self.assertEqual(saved["messages"], requests[-1]["messages"])
+        self.assertEqual(saved["request"]["tools"], [])
+        outcomes = [event for event in saved["trace"] if event["kind"] == "tool"]
+        self.assertEqual([event["message"]["tool_call_id"] for event in outcomes],
+                         [call["id"] for call in calls])
+        self.assertEqual([event["message"]["name"] for event in outcomes],
+                         [call["function"]["name"] for call in calls])
+        self.assertEqual([event["status"] for event in outcomes],
+                         ["completed"] * 3 + ["rejected"] + ["completed"] * 4 + ["rejected"] * 2)
+        for index in (3, 8, 9):
+            error = json.loads(outcomes[index]["message"]["content"])
+            self.assertEqual(error["error_type"], "invalid_arguments" if index == 3 else "search_budget_exhausted")
+            self.assertIs(error["executed"], False)
+        self.assertEqual(saved["trace"][0]["request"]["messages"], requests[0]["messages"])
+        self.assertEqual(saved["trace"][0]["request"]["tools"], requests[0]["tools"])
+        self.assertEqual(len(requests), 2)
+
+    def test_failed_fetch_retries_only_fetch_and_replays_completed_search_and_thinking(self):
+        self.client.post(f"/sessions/{self.sid}/send", data={"content": "Compare the paper", "web_search": "true"})
+        calls = [search_call("paper", "search-first", 1), fetch_call()]
+
+        def mixed_batch(model, messages, params, *, tools=None):
+            if messages[-1]["role"] != "tool":
+                yield {"type": "reasoning", "text": "Read the selected source"}
+                yield {"type": "done", "finish_reason": "tool_calls", "tool_calls": calls}
+            else:
+                self.assertEqual([message["name"] for message in messages if message["role"] == "tool"],
+                                 ["web_search", "web_fetch"])
+                self.assertEqual(messages[2]["reasoning"], "Read the selected source")
+                yield {"type": "content", "text": "Answer after fetching"}
+                yield {"type": "done"}
+
+        with patch.object(ollama, "chat_stream", side_effect=mixed_batch) as model, \
+                patch.object(ollama, "web_search", return_value=[]) as search, \
+                patch.object(ollama, "web_fetch", side_effect=httpx.ConnectError("private provider detail")):
+            generation._generate(db.claim_generation(self.sid))
+            self.assertEqual(model.call_count, 1)
+            search.assert_called_once_with("paper", max_results=1)
+        failed = db.list_generations(self.sid)[0]
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual([event["status"] for event in failed["trace"]], ["completed", "completed", "failed"])
+        prompt = self.client.get(f'/sessions/{self.sid}/messages/{failed["user_message_id"]}/prompt')
+        self.assertNotIn("private provider detail", prompt.text)
+        self.assertTrue(db.retry_generations(self.sid, web_search=True))
+        evidence = {"title": "Paper", "content": "The complete retrieved page", "links": []}
+        with patch.object(ollama, "chat_stream", side_effect=mixed_batch) as model, \
+                patch.object(ollama, "web_search") as search, \
+                patch.object(ollama, "web_fetch", return_value=evidence) as fetch:
+            generation._generate(db.claim_generation(self.sid))
+            search.assert_not_called()
+            fetch.assert_called_once_with("https://example.org/paper")
+            self.assertEqual(model.call_count, 1)
+        completed = db.list_generations(self.sid)[0]
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(completed["trace"][:2], failed["trace"][:2])
+        self.assertEqual(completed["trace"][-1]["status"], "completed")
+        self.assertEqual(json.loads(completed["trace"][-1]["message"]["content"])["content"], evidence["content"])
+        self.assertEqual(completed["request"]["search_budget"], {"limit": 8, "remaining": 6})
+
+    def test_missing_fetch_returns_a_paired_error_and_continues_the_batch(self):
+        question = "Find the paper and check its methods"
+        missing_url = "https://example.org/missing?version=2"
+        found_url = "https://example.org/paper"
+        self.client.post(f"/sessions/{self.sid}/send", data={"content": question, "web_search": "true"})
+        requests, fetched_urls = [], []
+        real_client = httpx.Client
+
+        def provider(request):
+            self.assertEqual(request.url.path, "/api/web_fetch")
+            url = json.loads(request.content)["url"]
+            fetched_urls.append(url)
+            if url == missing_url:
+                return httpx.Response(404, text="Private provider error body")
+            self.assertEqual(url, found_url)
+            return httpx.Response(200, json={"title": "Paper", "content": "42 samples", "links": []})
+
+        def provider_client(*args, **kwargs):
+            return real_client(*args, **kwargs, transport=httpx.MockTransport(provider))
+
+        def recover(model, messages, params, *, tools=None):
+            requests.append(json.loads(json.dumps(messages)))
+            outcomes = [message for message in messages if message["role"] == "tool"]
+            if not outcomes:
+                calls = [search_call("paper methods", "discover", 1)]
+            elif len(outcomes) == 1:
+                calls = [fetch_call(missing_url, "missing"), fetch_call(found_url, "found")]
+            else:
+                self.assertEqual([message["tool_call_id"] for message in outcomes], ["discover", "missing", "found"])
+                self.assertEqual(json.loads(outcomes[1]["content"])["status_code"], 404)
+                self.assertEqual(json.loads(outcomes[2]["content"])["content"], "42 samples")
+                self.assertNotIn("Private provider", json.dumps(messages))
+                yield {"type": "content", "text": "The paper has 42 samples; the other URL was unavailable."}
+                yield {"type": "done"}
+                return
+            yield {"type": "reasoning", "text": "Preserved research reasoning"}
+            yield {"type": "done", "finish_reason": "tool_calls", "tool_calls": calls}
+
+        with patch.object(ollama, "chat_stream", side_effect=recover), \
+                patch.object(ollama, "web_search", return_value=[]), \
+                patch.object(ollama.httpx, "Client", side_effect=provider_client):
+            generation._generate(db.claim_generation(self.sid))
+        saved = db.list_generations(self.sid)[0]
+        self.assertEqual(saved["status"], "completed")
+        self.assertEqual(fetched_urls, [missing_url, found_url])
+        self.assertEqual([event["status"] for event in saved["trace"]],
+                         ["completed", "completed", "completed", "unavailable", "completed"])
+        missing = saved["trace"][3]
+        outcome = json.loads(missing["message"]["content"])
+        self.assertEqual(outcome["url"], missing_url)
+        self.assertEqual(outcome["error_type"], "http_not_found")
+        self.assertIs(outcome["executed"], True)
+        self.assertIn("attempted_at", outcome)
+        self.assertNotIn("fetched_at", outcome)
+        self.assertNotIn("content", outcome)
+        self.assertEqual(saved["request"]["search_budget"], {"limit": 8, "remaining": 5})
+        self.assertEqual(saved["messages"], requests[-1])
+        self.assertEqual(saved["base_request"]["messages"][-1], {"role": "user", "content": question})
+        self.assertEqual([message["reasoning"] for message in saved["messages"]
+                          if message["role"] == "assistant"], ["Preserved research reasoning"] * 2)
+        prompt = self.client.get(f'/sessions/{self.sid}/messages/{saved["assistant_message_id"]}/prompt')
+        self.assertEqual(self.prompt_messages(prompt), requests[-1])
+        page = self.client.get(f"/?session={self.sid}").text
+        self.assertIn('data-event-status="unavailable"', page)
+        self.assertIn('data-error-type="http_not_found"', page)
+        self.assertNotIn("Private provider", page)
+        self.send("Explain the limitations")
+        followup = db.list_generations(self.sid)[-1]
+        self.assertIn(missing["message"], followup["messages"])
+
+    def test_missing_fetches_consume_budget_and_allow_a_tools_free_final_answer(self):
+        self.client.post(f"/sessions/{self.sid}/send", data={"content": "Check these sources", "web_search": "true"})
+
+        def all_missing(model, messages, params, *, tools=None):
+            outcomes = [message for message in messages if message["role"] == "tool"]
+            if not outcomes:
+                yield {"type": "done", "finish_reason": "tool_calls", "tool_calls": [
+                    fetch_call(f"https://example.org/missing/{index}", f"missing-{index}") for index in range(9)
+                ]}
+                return
+            self.assertEqual(tools, [])
+            self.assertEqual(len(outcomes), 9)
+            self.assertEqual([json.loads(message["content"])["status_code"] for message in outcomes[:8]], [404] * 8)
+            self.assertIs(json.loads(outcomes[-1]["content"])["executed"], False)
+            yield {"type": "content", "text": "These sources were unavailable; I cannot verify the claim."}
+            yield {"type": "done"}
+
+        with patch.object(ollama, "chat_stream", side_effect=all_missing) as model, \
+                patch.object(ollama, "web_fetch", side_effect=web_http_error(404)) as fetch:
+            generation._generate(db.claim_generation(self.sid))
+            self.assertEqual(fetch.call_count, 8)
+            self.assertEqual(model.call_count, 2)
+        saved = db.list_generations(self.sid)[0]
+        self.assertEqual(saved["status"], "completed")
+        self.assertEqual([event["status"] for event in saved["trace"][1:]], ["unavailable"] * 8 + ["rejected"])
+        self.assertTrue(saved["request"]["search_final_answer"])
+        self.assertEqual(saved["request"]["search_budget"], {"limit": 8, "remaining": 0})
+
+    def test_missing_fetch_outcome_is_reused_on_retry_event_fork_and_edited_fork(self):
+        self.client.post(f"/sessions/{self.sid}/send", data={"content": "Read the page", "web_search": "true"})
+
+        def interrupted_answer(model, messages, params, *, tools=None):
+            if messages[-1]["role"] == "tool":
+                raise httpx.ReadError("Interrupted model connection")
+            yield {"type": "done", "finish_reason": "tool_calls", "tool_calls": [fetch_call()]}
+
+        with patch.object(ollama, "chat_stream", side_effect=interrupted_answer), \
+                patch.object(ollama, "web_fetch", side_effect=web_http_error(404)) as fetch:
+            generation._generate(db.claim_generation(self.sid))
+            fetch.assert_called_once()
+        failed = db.list_generations(self.sid)[0]
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["trace"][-1]["status"], "unavailable")
+
+        def finish_from_saved(model, messages, params, *, tools=None):
+            self.assertEqual(messages[-1], failed["trace"][-1]["message"])
+            yield {"type": "content", "text": "The page could not be retrieved; the claim remains unverified."}
+            yield {"type": "done"}
+
+        self.assertTrue(db.retry_generations(self.sid, web_search=False))
+        with patch.object(ollama, "chat_stream", side_effect=finish_from_saved), \
+                patch.object(ollama, "web_fetch") as fetch:
+            generation._generate(db.claim_generation(self.sid))
+            fetch.assert_not_called()
+        source = db.list_generations(self.sid)[0]
+        self.assertEqual(source["status"], "completed")
+        self.assertEqual(source["trace"], failed["trace"])
+        fork = db.fork_session(self.sid, source["user_message_id"], event_index=1, trace_id=source["trace_id"])
+        fork_job = db.list_generations(fork["id"])[0]
+        self.assertEqual(fork_job["trace_id"], source["trace_id"])
+        db.request_response(fork["id"], fork_job["user_message_id"], web_search=False)
+        with patch.object(ollama, "chat_stream", side_effect=finish_from_saved), \
+                patch.object(ollama, "web_fetch") as fetch:
+            generation._generate(db.claim_generation(fork["id"]))
+            fetch.assert_not_called()
+        continued = db.list_generations(fork["id"])[0]
+        self.assertEqual(continued["status"], "completed")
+        self.assertEqual(continued["request"]["search_budget"], {"limit": 8, "remaining": 7})
+
+        snapshot, draft = self.edit_draft()
+        self.assertTrue(snapshot["tool_groups"][0]["complete"])
+        draft["messages"][0]["content"] = "Explain why the page is unavailable"
+        draft["messages"][-1]["include"] = False
+        draft["tools"][0]["explicit"] = True
+        edited = db.save_edited_fork(self.sid, draft, send=True, web_search=True)
+        with patch.object(ollama, "chat_stream", side_effect=finish_from_saved), \
+                patch.object(ollama, "web_fetch") as fetch:
+            generation._generate(db.claim_generation(edited["id"]))
+            fetch.assert_not_called()
+        retained = db.list_generations(edited["id"])[0]
+        self.assertEqual(retained["status"], "completed")
+        self.assertEqual(retained["request"]["search_budget"], {"limit": 8, "remaining": 8})
+        self.assertTrue(all(event["retained"] for event in retained["trace"]))
+        self.assertEqual(db.list_generations(self.sid)[0]["trace"], source["trace"])
+
+    def test_auth_service_and_non_fetch_404_errors_remain_fatal(self):
+        cases = [("web_fetch", code) for code in (400, 401, 403, 429, 500, 503)]
+        cases += [("web_search", 404), ("model", 404)]
+        for name, code in cases:
+            with self.subTest(name=name, code=code):
+                sid = db.create_session(self.folder["id"], model="test-model")["id"]
+                self.client.post(f"/sessions/{sid}/send", data={"content": "Check this", "web_search": "true"})
+                error = web_http_error(code, "/v1/chat/completions" if name == "model" else f"/api/{name}")
+
+                def request_tool(model, messages, params, *, tools=None):
+                    if name == "model":
+                        raise error
+                    yield {"type": "done", "finish_reason": "tool_calls",
+                           "tool_calls": [fetch_call() if name == "web_fetch" else search_call()]}
+
+                with patch.object(ollama, "chat_stream", side_effect=request_tool) as model, \
+                        patch.object(ollama, "web_fetch", side_effect=error), \
+                        patch.object(ollama, "web_search", side_effect=error):
+                    generation._generate(db.claim_generation(sid))
+                    self.assertEqual(model.call_count, 1)
+                saved = db.list_generations(sid)[0]
+                self.assertEqual(saved["status"], "failed")
+                self.assertEqual([event["status"] for event in saved["trace"]],
+                                 [] if name == "model" else ["completed", "failed"])
+                self.assertNotIn("Private provider", json.dumps(saved))
+
+    def test_missing_fetch_cannot_overwrite_a_stopped_and_retried_attempt(self):
+        self.client.post(f"/sessions/{self.sid}/send", data={"content": "Read this", "web_search": "true"})
+        queued = []
+
+        def request_tool(model, messages, params, *, tools=None):
+            yield {"type": "done", "finish_reason": "tool_calls", "tool_calls": [fetch_call()]}
+
+        def interrupted_fetch(url):
+            db.interrupt_generations(self.sid, "Stopped", status="cancelled")
+            self.assertTrue(db.retry_generations(self.sid, web_search=False))
+            queued.append(db.list_generations(self.sid)[0])
+            raise web_http_error(404)
+
+        with patch.object(ollama, "chat_stream", side_effect=request_tool) as model, \
+                patch.object(ollama, "web_fetch", side_effect=interrupted_fetch):
+            generation._generate(db.claim_generation(self.sid))
+            self.assertEqual(model.call_count, 1)
+        self.assertEqual(db.list_generations(self.sid)[0], queued[0])
+        self.assertEqual(queued[0]["status"], "queued")
+
+    def test_fetch_event_forks_and_explicit_edited_reuse_preserve_shared_evidence(self):
+        self.client.post(f"/sessions/{self.sid}/send", data={"content": "Original research", "web_search": "true"})
+        evidence = {"title": "Paper", "content": "Unique immutable fetched evidence\n  " * 600, "links": ["/details"]}
+
+        def mixed_batch(model, messages, params, *, tools=None):
+            if messages[-1]["role"] != "tool":
+                yield {"type": "reasoning", "text": "Preserved fetch planning"}
+                yield {"type": "done", "finish_reason": "tool_calls",
+                       "tool_calls": [search_call("paper", "search-first", 1), fetch_call()]}
+            else:
+                yield {"type": "content", "text": "Answer using saved evidence"}
+                yield {"type": "done"}
+
+        with patch.object(ollama, "chat_stream", side_effect=mixed_batch), \
+                patch.object(ollama, "web_search", return_value=[]), \
+                patch.object(ollama, "web_fetch", return_value=evidence):
+            generation._generate(db.claim_generation(self.sid))
+        source = db.list_generations(self.sid)[0]
+        self.assertEqual(source["status"], "completed")
+        uid = source["user_message_id"]
+        for after_fetch, allowed in ((False, False), (False, True), (True, False)):
+            with self.subTest(after_fetch=after_fetch, allowed=allowed):
+                index = 2 if after_fetch else 1
+                fork = db.fork_session(self.sid, uid, event_index=index, trace_id=source["trace_id"])
+                pending = db.list_generations(fork["id"])[0]
+                self.assertEqual(pending["trace"], source["trace"][:index + 1])
+                self.assertEqual(sum(message.get("name") == "web_fetch" for message in pending["messages"]),
+                                 int(after_fetch))
+                db.request_response(fork["id"], pending["user_message_id"], web_search=allowed)
+                with patch.object(ollama, "chat_stream", side_effect=mixed_batch) as model, \
+                        patch.object(ollama, "web_search") as search, \
+                        patch.object(ollama, "web_fetch", return_value=evidence) as fetch:
+                    generation._generate(db.claim_generation(fork["id"]))
+                    search.assert_not_called()
+                    if allowed and not after_fetch:
+                        fetch.assert_called_once_with("https://example.org/paper")
+                    else:
+                        fetch.assert_not_called()
+                    self.assertEqual(model.call_count, int(after_fetch or allowed))
+                finished = db.list_generations(fork["id"])[0]
+                self.assertEqual(finished["status"], "completed" if after_fetch or allowed else "failed")
+                if after_fetch or allowed:
+                    self.assertEqual([message["reasoning"] for message in finished["messages"]
+                                      if message["role"] == "assistant"], ["Preserved fetch planning"])
+                    self.assertEqual(finished["request"]["search_budget"], {"limit": 8, "remaining": 6})
+                    saved_content = finished["messages"][-1]["content"]
+                    finished["messages"][-1]["content"] = "Tampered decoded branch"
+                    self.assertEqual(db.list_generations(fork["id"])[0]["messages"][-1]["content"], saved_content)
+                db.delete_session(fork["id"])
+                self.assertEqual(db.list_generations(self.sid)[0]["trace"], source["trace"])
+
+        snapshot, draft = self.edit_draft()
+        self.assertEqual(len(snapshot["tool_groups"]), 1)
+        draft["messages"][0]["content"] = "Edited question using the recorded page"
+        draft["messages"][-1]["include"] = False
+        before = self.payload_stats()
+        with self.assertRaises(ValueError):
+            db.save_edited_fork(self.sid, draft, send=True, web_search=False)
+        self.assertEqual(self.payload_stats(), before)
+        draft["tools"][0]["explicit"] = True
+        reused = db.save_edited_fork(self.sid, draft, send=True, web_search=False)
+        retained = db.list_generations(reused["id"])[0]
+        self.assertTrue(all(event["retained"] for event in retained["trace"]))
+        self.assertEqual([event["message"] for event in retained["trace"]],
+                         [event["message"] for event in source["trace"]])
+        self.assertEqual(retained["messages"][-1], source["messages"][-1])
+        self.assertEqual(retained["messages"][1]["content"], "Edited question using the recorded page")
+
+        def use_retained(model, messages, params, *, tools=None):
+            self.assertEqual(tools, [])
+            self.assertEqual(json.loads(messages[-1]["content"])["content"], evidence["content"])
+            yield {"type": "content", "text": "Edited answer from retained evidence"}
+            yield {"type": "done"}
+
+        with patch.object(ollama, "chat_stream", side_effect=use_retained), \
+                patch.object(ollama, "web_search") as search, patch.object(ollama, "web_fetch") as fetch:
+            generation._generate(db.claim_generation(reused["id"]))
+            search.assert_not_called()
+            fetch.assert_not_called()
+        self.assertEqual(db.list_generations(reused["id"])[0]["status"], "completed")
+        self.assertEqual(db.list_generations(self.sid)[0]["trace"], source["trace"])
+        self.assertEqual(db._conn.execute(
+            "SELECT COUNT(*) FROM payloads WHERE instr(body, 'Unique immutable fetched evidence') > 0"
+        ).fetchone()[0], 1)
 
     def test_model_corrects_search_limit_errors_without_executing_invalid_calls(self):
         self.client.post(f"/sessions/{self.sid}/send", data={"content": "Verify the quote", "web_search": "true"})
@@ -1188,7 +1735,8 @@ class AppTests(unittest.TestCase):
         ])) as model:
             generation._generate(db.claim_generation(self.sid))
             search.assert_not_called()
-            self.assertEqual(model.call_args.kwargs["tools"][0]["function"]["name"], "web_search")
+            self.assertEqual([tool["function"]["name"] for tool in model.call_args.kwargs["tools"]],
+                             ["web_search", "web_fetch"])
         job = db.list_generations(self.sid)[0]
         self.assertEqual(job["status"], "completed")
         self.assertEqual(job["trace"], [])
@@ -2402,6 +2950,92 @@ class AppTests(unittest.TestCase):
 
 
 class OllamaTests(unittest.TestCase):
+    def test_web_fetch_posts_only_to_provider_with_auth_and_preserves_full_response(self):
+        real_client = httpx.Client
+        target = "http://127.0.0.1:8080/private?revision=2"
+        evidence = {
+            "title": "Complete page <title>",
+            "content": ("First paragraph\n\n    indented extracted text 日本語\n" * 5000) + "Final paragraph",
+            "links": ["https://example.org/details", "/relative", "mailto:author@example.org",
+                      "javascript:alert(1)"] + [f"/reference/{index}" for index in range(200)],
+        }
+        requests = []
+
+        def respond(request):
+            requests.append(request)
+            return httpx.Response(200, json=evidence)
+
+        def provider_client(*args, **kwargs):
+            return real_client(*args, **kwargs, transport=httpx.MockTransport(respond))
+
+        with patch.object(ollama, "API_BASE", "https://provider.example"), \
+                patch.dict(os.environ, {"OLLAMA_API_KEY": "fetch-provider-key"}), \
+                patch.object(ollama.httpx, "Client", side_effect=provider_client):
+            result = ollama.web_fetch(target)
+        self.assertEqual(result, evidence)
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(requests[0].method, "POST")
+        self.assertEqual(str(requests[0].url), "https://provider.example/api/web_fetch")
+        self.assertEqual(json.loads(requests[0].content), {"url": target})
+        self.assertEqual(requests[0].headers["Authorization"], "Bearer fetch-provider-key")
+
+    def test_malformed_web_fetch_responses_are_rejected(self):
+        real_client = httpx.Client
+        valid = {"title": "Paper", "content": "Full content", "links": []}
+        malformed = [
+            None, [], "page", {}, {"error": "upstream rejected the request"},
+            {**valid, "error": "upstream error"},
+            {"title": "Paper", "links": []}, {"title": "Paper", "content": "Page"},
+            {**valid, "title": None}, {**valid, "title": 3},
+            {**valid, "content": None}, {**valid, "content": ["Page"]},
+            {**valid, "links": None}, {**valid, "links": "https://example.org"},
+            {**valid, "links": {}}, {**valid, "links": [None]},
+            {**valid, "links": [3]}, {**valid, "links": [{"url": "https://example.org"}]},
+        ]
+        for data in malformed:
+            with self.subTest(data=data):
+                def provider_client(*args, **kwargs):
+                    return real_client(*args, **kwargs, transport=httpx.MockTransport(
+                        lambda request: httpx.Response(200, content=json.dumps(data),
+                                                       headers={"Content-Type": "application/json"})
+                    ))
+
+                with patch.object(ollama.httpx, "Client", side_effect=provider_client):
+                    with self.assertRaises(ValueError):
+                        ollama.web_fetch("https://example.org/paper")
+
+    def test_web_fetch_http_json_and_transport_errors_are_not_success(self):
+        real_client = httpx.Client
+        for status in (401, 429, 503):
+            with self.subTest(status=status):
+                def provider_client(*args, **kwargs):
+                    return real_client(*args, **kwargs, transport=httpx.MockTransport(
+                        lambda request: httpx.Response(status, json={"error": "provider failed"})
+                    ))
+
+                with patch.object(ollama.httpx, "Client", side_effect=provider_client):
+                    with self.assertRaises(httpx.HTTPStatusError):
+                        ollama.web_fetch("https://example.org/paper")
+
+        def malformed_client(*args, **kwargs):
+            return real_client(*args, **kwargs, transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, text="not JSON")
+            ))
+
+        with patch.object(ollama.httpx, "Client", side_effect=malformed_client):
+            with self.assertRaises(ValueError):
+                ollama.web_fetch("https://example.org/paper")
+
+        def offline(request):
+            raise httpx.ConnectError("provider offline", request=request)
+
+        def offline_client(*args, **kwargs):
+            return real_client(*args, **kwargs, transport=httpx.MockTransport(offline))
+
+        with patch.object(ollama.httpx, "Client", side_effect=offline_client):
+            with self.assertRaises(httpx.ConnectError):
+                ollama.web_fetch("https://example.org/paper")
+
     def test_malformed_or_unsafe_search_results_are_rejected(self):
         real_client = httpx.Client
         for data in ({}, {"results": [{"title": "Bad", "url": "javascript:alert(1)", "content": "x"}]},

@@ -212,12 +212,487 @@ class AppTests(unittest.TestCase):
         draft = {
             "revision": snapshot["revision"],
             "messages": [{"id": message["id"], "include": True, "content": message["content"],
+                          "reasoning": message["reasoning"],
                           "attachments": [attachment["index"] for attachment in message["attachments"]]}
                          for message in snapshot["messages"]],
-            "tools": [{"key": group["key"], "include": group["complete"], "explicit": False}
-                      for group in snapshot["tool_groups"]],
+            "tools": [{"key": group["key"], "include": group["complete"], "explicit": False,
+                       "reasoning": group["reasoning"]} for group in snapshot["tool_groups"]],
         }
         return snapshot, draft
+
+    def test_model_corrects_search_limit_errors_without_executing_invalid_calls(self):
+        self.client.post(f"/sessions/{self.sid}/send", data={"content": "Verify the quote", "web_search": "true"})
+        requests = []
+
+        def correct_searches(model, messages, params, *, tools=None):
+            requests.append(json.loads(json.dumps(messages)))
+            results = [message for message in messages if message["role"] == "tool"]
+            yield {"type": "reasoning", "text": "Check the search result limit."}
+            if not results:
+                calls = [search_call(query, f"bad-{index}", 10)
+                         for index, query in enumerate(("Japanese quote", "Korean quote"))]
+            elif len(results) == 2:
+                self.assertTrue(all(json.loads(result["content"])["error_type"] == "invalid_arguments"
+                                    for result in results))
+                self.assertTrue(all(json.loads(result["content"])["executed"] is False for result in results))
+                calls = [search_call(query, f"fixed-{index}", 5)
+                         for index, query in enumerate(("Japanese quote", "Korean quote"))]
+            else:
+                yield {"type": "content", "text": "Verified answer"}
+                yield {"type": "done", "usage": {"total_tokens": 7}}
+                return
+            yield {"type": "done", "finish_reason": "tool_calls", "tool_calls": calls,
+                   "usage": {"total_tokens": 3}}
+
+        with patch.object(ollama, "chat_stream", side_effect=correct_searches), \
+                patch.object(ollama, "web_search", return_value=[]) as search, \
+                patch.object(db, "start_tool", wraps=db.start_tool) as started:
+            generation._generate(db.claim_generation(self.sid))
+            self.assertEqual([call.kwargs["max_results"] for call in search.call_args_list], [5, 5])
+            self.assertEqual([call.args[0] for call in search.call_args_list], ["Japanese quote", "Korean quote"])
+            self.assertEqual([call.args[1] for call in started.call_args_list], ["fixed-0", "fixed-1"])
+        job = db.list_generations(self.sid)[0]
+        self.assertEqual(job["status"], "completed")
+        self.assertEqual([event["status"] for event in job["trace"]],
+                         ["completed", "rejected", "rejected", "completed", "completed", "completed"])
+        self.assertEqual(db.visible_messages(self.sid)[-1]["total_tokens"], 13)
+        self.assertEqual(json.loads(job["trace"][0]["message"]["tool_calls"][0]["function"]["arguments"])["max_results"], 10)
+        self.assertEqual(job["trace"][3]["request"]["messages"], requests[1])
+        self.assertEqual(requests[1][2]["reasoning"], "Check the search result limit.")
+        self.assertEqual(job["messages"], requests[2])
+        self.assertEqual(db.visible_messages(self.sid)[0]["content"], "Verify the quote")
+
+    def test_invalid_search_fields_are_resolved_tool_errors_not_searches(self):
+        for arguments in ({"query": "  "}, {"query": 2}, {"max_results": 3},
+                          {"query": "valid", "max_results": 0}, {"query": "valid", "max_results": 6},
+                          {"query": "valid", "max_results": True}, {"query": "valid", "max_results": "5"},
+                          {"query": "valid", "max_results": 2.5}, {"query": "valid", "extra": "unsupported"}):
+            with self.subTest(arguments=arguments):
+                sid = db.create_session(self.folder["id"], model="test-model")["id"]
+                self.client.post(f"/sessions/{sid}/send", data={"content": "Research", "web_search": "true"})
+
+                def decline_after_error(model, messages, params, *, tools=None):
+                    if messages[-1]["role"] != "tool":
+                        call = search_call()
+                        call["function"]["arguments"] = json.dumps(arguments)
+                        yield {"type": "done", "finish_reason": "tool_calls", "tool_calls": [call]}
+                    else:
+                        self.assertEqual(json.loads(messages[-1]["content"])["error_type"], "invalid_arguments")
+                        yield {"type": "content", "text": "I will answer without searching."}
+                        yield {"type": "done"}
+
+                with patch.object(ollama, "chat_stream", side_effect=decline_after_error), \
+                        patch.object(ollama, "web_search") as search:
+                    generation._generate(db.claim_generation(sid))
+                    search.assert_not_called()
+                job = db.list_generations(sid)[0]
+                self.assertEqual(job["status"], "completed")
+                self.assertEqual(job["trace"][1]["status"], "rejected")
+                self.assertNotIn("started_at", job["trace"][1])
+
+    def test_mixed_search_batch_preserves_valid_results_and_corrects_only_invalid_call(self):
+        self.client.post(f"/sessions/{self.sid}/send", data={"content": "Compare", "web_search": "true"})
+
+        def mixed_batch(model, messages, params, *, tools=None):
+            results = [message for message in messages if message["role"] == "tool"]
+            if not results:
+                calls = [search_call("Good query", "good", 1), search_call("Bad query", "bad", 10)]
+            elif len(results) == 2:
+                self.assertEqual([message["tool_call_id"] for message in results], ["good", "bad"])
+                self.assertEqual(json.loads(results[0]["content"])["query"], "Good query")
+                self.assertEqual(json.loads(results[1]["content"])["executed"], False)
+                fixed = search_call("Corrected query", "fixed")
+                fixed["function"]["arguments"] = json.dumps({"query": "Corrected query"})
+                calls = [fixed]
+            else:
+                yield {"type": "content", "text": "Compared the sources"}
+                yield {"type": "done"}
+                return
+            yield {"type": "done", "finish_reason": "tool_calls", "tool_calls": calls}
+
+        with patch.object(ollama, "chat_stream", side_effect=mixed_batch), \
+                patch.object(ollama, "web_search", return_value=[]) as search:
+            generation._generate(db.claim_generation(self.sid))
+            self.assertEqual([(call.args[0], call.kwargs["max_results"]) for call in search.call_args_list],
+                             [("Good query", 1), ("Corrected query", 5)])
+        self.assertEqual(db.list_generations(self.sid)[0]["status"], "completed")
+
+    def test_retry_of_previously_failed_validation_returns_error_to_model(self):
+        self.client.post(f"/sessions/{self.sid}/send", data={"content": "Old failed search", "web_search": "true"})
+        old_job = db.claim_generation(self.sid)
+        invalid = search_call("Saved query", "old-invalid", 10)
+        db.record_tool_calls(old_job, {"role": "assistant", "content": "", "tool_calls": [invalid]}, "Saved thought", None)
+        db.interrupt_generations(self.sid, "Old invalid search error", job=old_job)
+        self.assertEqual(db.list_generations(self.sid)[0]["trace"][1]["status"], "failed")
+        self.assertTrue(db.retry_generations(self.sid, web_search=True))
+
+        def repair_saved_call(model, messages, params, *, tools=None):
+            result = json.loads(messages[-1]["content"])
+            if result.get("error_type") == "invalid_arguments":
+                self.assertEqual(messages[-1]["tool_call_id"], "old-invalid")
+                yield {"type": "done", "finish_reason": "tool_calls",
+                       "tool_calls": [search_call("Saved query", "repaired", 5)]}
+            else:
+                yield {"type": "content", "text": "Recovered answer"}
+                yield {"type": "done"}
+
+        with patch.object(ollama, "chat_stream", side_effect=repair_saved_call) as model, \
+                patch.object(ollama, "web_search", return_value=[]) as search:
+            generation._generate(db.claim_generation(self.sid))
+            self.assertEqual(model.call_count, 2)
+            search.assert_called_once_with("Saved query", max_results=5)
+        self.assertEqual(db.list_generations(self.sid)[0]["status"], "completed")
+
+    def test_rejected_call_survives_failed_continuation_retry_and_forks(self):
+        self.client.post(f"/sessions/{self.sid}/send", data={"content": "Research", "web_search": "true"})
+
+        def fail_after_rejection(model, messages, params, *, tools=None):
+            if messages[-1]["role"] == "tool":
+                raise httpx.ConnectError("Model offline")
+            yield {"type": "done", "finish_reason": "tool_calls",
+                   "tool_calls": [search_call("Query", "invalid", 10)]}
+
+        with patch.object(ollama, "chat_stream", side_effect=fail_after_rejection), \
+                patch.object(ollama, "web_search") as search:
+            generation._generate(db.claim_generation(self.sid))
+            search.assert_not_called()
+        failed = db.list_generations(self.sid)[0]
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["trace"][-1]["status"], "rejected")
+        fork = db.fork_session(self.sid, failed["user_message_id"], event_index=1, trace_id=failed["trace_id"])
+        snapshot, draft = self.edit_draft(fork["id"])
+        self.assertTrue(snapshot["tool_groups"][0]["complete"])
+        edited = db.save_edited_fork(fork["id"], draft, send=True)
+        self.assertTrue(db.retry_generations(self.sid, web_search=False))
+        for sid in (self.sid, edited["id"]):
+            def finish_without_search(model, messages, params, *, tools=None):
+                self.assertEqual(json.loads(messages[-1]["content"])["error_type"], "invalid_arguments")
+                self.assertEqual(tools, [])
+                yield {"type": "content", "text": "Finished without searching"}
+                yield {"type": "done"}
+            with patch.object(ollama, "chat_stream", side_effect=finish_without_search), \
+                    patch.object(ollama, "web_search") as search, \
+                    patch.object(db, "reject_tool", wraps=db.reject_tool) as reject:
+                generation._generate(db.claim_generation(sid))
+                search.assert_not_called()
+                reject.assert_not_called()
+            self.assertEqual(db.list_generations(sid)[0]["status"], "completed")
+
+    def test_repeated_invalid_searches_use_the_budget_then_finalize_without_searching(self):
+        self.client.post(f"/sessions/{self.sid}/send", data={"content": "Research", "web_search": "true"})
+
+        def always_invalid(model, messages, params, *, tools=None):
+            index = sum(message["role"] == "tool" for message in messages)
+            if not tools:
+                self.assertEqual(index, 8)
+                self.assertEqual(messages[-1]["role"], "system")
+                yield {"type": "content", "text": "I could not gather reliable evidence."}
+                yield {"type": "done"}
+                return
+            yield {"type": "done", "finish_reason": "tool_calls",
+                   "tool_calls": [search_call("Query", f"invalid-{index}", 10)]}
+
+        with patch.object(ollama, "chat_stream", side_effect=always_invalid) as model, \
+                patch.object(ollama, "web_search") as search:
+            generation._generate(db.claim_generation(self.sid))
+            self.assertEqual(model.call_count, 9)
+            search.assert_not_called()
+        job = db.list_generations(self.sid)[0]
+        self.assertEqual(job["status"], "completed")
+        rejected = [event for event in job["trace"] if event["status"] == "rejected"]
+        self.assertEqual(len(rejected), 8)
+        self.assertTrue(all(json.loads(event["message"]["content"])["error_type"] == "invalid_arguments"
+                            for event in rejected))
+        self.assertEqual(job["request"]["search_budget"], {"limit": 8, "remaining": 0})
+        self.assertEqual(db.visible_messages(self.sid)[-1]["content"], "I could not gather reliable evidence.")
+
+    def test_argument_recovery_never_overrides_permission_or_unknown_tools(self):
+        for allowed in (False, True):
+            with self.subTest(allowed=allowed):
+                sid = db.create_session(self.folder["id"], model="test-model")["id"]
+                self.client.post(f"/sessions/{sid}/send", data={"content": "Research", "web_search": str(allowed).lower()})
+
+                def invalid_or_unknown(model, messages, params, *, tools=None):
+                    calls = [search_call("Query", "bad", 10)]
+                    if allowed:
+                        calls = [search_call("Valid query", "valid", 5), search_call("Other", "unknown", 2)]
+                        calls[1]["function"]["name"] = "unoffered_tool"
+                    yield {"type": "done", "finish_reason": "tool_calls", "tool_calls": calls}
+
+                with patch.object(ollama, "chat_stream", side_effect=invalid_or_unknown) as model, \
+                        patch.object(ollama, "web_search") as search:
+                    generation._generate(db.claim_generation(sid))
+                    self.assertEqual(model.call_count, 1)
+                    search.assert_not_called()
+                job = db.list_generations(sid)[0]
+                self.assertEqual(job["status"], "failed")
+                self.assertFalse(any(event["status"] == "rejected" for event in job["trace"]))
+
+    def test_cancelled_attempt_cannot_persist_a_late_argument_rejection(self):
+        self.client.post(f"/sessions/{self.sid}/send", data={"content": "Research", "web_search": "true"})
+        old = db.claim_generation(self.sid)
+        db.record_tool_calls(old, {"role": "assistant", "content": "",
+                                  "tool_calls": [search_call("Query", "invalid", 10)]}, "", None)
+        db.interrupt_generations(self.sid, "Stopped", "cancelled")
+        db.retry_generations(self.sid, web_search=True)
+        current = db.claim_generation(self.sid)
+        before = db.list_generations(self.sid)[0]
+        size = self.payload_stats()
+        self.assertFalse(db.reject_tool(old, "invalid", "Late validation result"))
+        self.assertEqual(db.list_generations(self.sid)[0], before)
+        self.assertEqual(self.payload_stats(), size)
+        self.assertTrue(db.reject_tool(current, "invalid", "Current validation result"))
+        self.assertEqual(db.list_generations(self.sid)[0]["trace"][-1]["status"], "rejected")
+
+    def test_thinking_survives_tool_rounds_and_the_next_user_turn(self):
+        requests = []
+
+        def think_and_search(model, messages, params, *, tools=None):
+            requests.append(json.loads(json.dumps(messages)))
+            round_number = sum(message["role"] == "tool" for message in messages)
+            if round_number < 2:
+                yield {"type": "reasoning", "text": f"Round {round_number + 1}\n  verify evidence"}
+                yield {"type": "done", "finish_reason": "tool_calls",
+                       "tool_calls": [search_call(f"Evidence {round_number + 1}", f"call-{round_number + 1}")]}
+            else:
+                yield {"type": "reasoning", "text": "Final reasoning\n  compare both sources"}
+                yield {"type": "content", "text": "Final answer"}
+                yield {"type": "done", "finish_reason": "stop"}
+
+        self.client.post(f"/sessions/{self.sid}/send", data={"content": "Research", "web_search": "true"})
+        with patch.object(ollama, "chat_stream", side_effect=think_and_search), \
+                patch.object(ollama, "web_search", return_value=[]):
+            generation._generate(db.claim_generation(self.sid))
+        self.assertEqual([message["reasoning"] for message in requests[2] if message["role"] == "assistant"],
+                         ["Round 1\n  verify evidence", "Round 2\n  verify evidence"])
+        self.assertEqual(requests[1][2]["content"], "")
+        self.assertEqual(requests[1][2]["tool_calls"][0]["id"], "call-1")
+        saved = db.list_generations(self.sid)[0]
+        self.assertEqual(saved["trace"][2]["request"]["messages"], requests[1])
+        self.assertEqual(saved["messages"], requests[2])
+        self.send("Follow up")
+        following = db.list_generations(self.sid)[-1]
+        self.assertEqual([message["reasoning"] for message in following["messages"]
+                          if message["role"] == "assistant"],
+                         ["Round 1\n  verify evidence", "Round 2\n  verify evidence",
+                          "Final reasoning\n  compare both sources"])
+        self.assertEqual([message["content"] for message in following["messages"] if message["role"] == "user"],
+                         ["Research", "Follow up"])
+        self.assertTrue(all("reasoning" not in message for message in following["messages"]
+                            if message["role"] != "assistant"))
+
+    def test_thinking_only_edit_clear_and_repeated_provenance(self):
+        self.send("Question")
+        original = self.finish("Answer", reasoning="Original thought", usage={"total_tokens": 11})
+        _, draft = self.edit_draft()
+        thinking = "  Corrected reasoning\n<script>not executable</script>\n"
+        draft["messages"][1]["reasoning"] = thinking
+        first_fork = db.save_edited_fork(self.sid, draft)
+        edited = db.visible_messages(first_fork["id"])[-1]
+        self.assertEqual((edited["content"], edited["reasoning"]), ("Answer", thinking))
+        self.assertEqual(edited["provenance"]["edited_fields"], ["reasoning"])
+        self.assertEqual(edited["provenance"]["before_reasoning"], "Original thought")
+        self.assertIsNone(edited["total_tokens"])
+        self.assertIsNone(edited["model"])
+        self.assertEqual(db.get_message_generation(first_fork["id"], edited["id"])["messages"], original["messages"])
+        _, second_draft = self.edit_draft(first_fork["id"])
+        second_draft["messages"][1]["content"] = ""
+        second_fork = db.save_edited_fork(first_fork["id"], second_draft)
+        reasoning_only = db.visible_messages(second_fork["id"])[-1]
+        self.assertEqual((reasoning_only["content"], reasoning_only["reasoning"]), ("", thinking))
+        self.assertEqual(reasoning_only["provenance"]["before_reasoning"], thinking)
+        self.assertEqual(reasoning_only["provenance"]["source_reasoning"], "Original thought")
+        _, third_draft = self.edit_draft(first_fork["id"])
+        third_draft["messages"][1]["reasoning"] = ""
+        cleared_fork = db.save_edited_fork(first_fork["id"], third_draft)
+        cleared = db.visible_messages(cleared_fork["id"])[-1]
+        self.assertFalse(cleared["reasoning"])
+        self.assertEqual(cleared["provenance"]["before_reasoning"], thinking)
+        self.client.post(f'/sessions/{cleared_fork["id"]}/send', data={"content": "Next"})
+        pending = db.list_generations(cleared_fork["id"])[-1]
+        self.assertEqual(pending["messages"][2], {"role": "assistant", "content": "Answer"})
+        self.client.post(f'/sessions/{second_fork["id"]}/send', data={"content": "Use the corrected reasoning"})
+        self.assertEqual(db.list_generations(second_fork["id"])[-1]["messages"][2],
+                         {"role": "assistant", "content": "", "reasoning": thinking})
+        self.assertEqual(db.visible_messages(self.sid)[-1]["reasoning"], "Original thought")
+        db.delete_session(self.sid)
+        db.delete_session(first_fork["id"])
+        self.assertEqual(db.visible_messages(second_fork["id"])[-1]["role"], "user")
+        self.assertEqual(db.visible_messages(second_fork["id"])[1]["provenance"]["source_reasoning"],
+                         "Original thought")
+
+    def test_thinking_edit_invalidates_later_tool_reuse_without_erasing_manual_lineage(self):
+        self.send("First question")
+        self.finish("First answer", reasoning="First thought")
+        self.client.post(f"/sessions/{self.sid}/send", data={"content": "Search follow-up", "web_search": "true"})
+        with patch.object(ollama, "chat_stream", side_effect=search_stream), \
+                patch.object(ollama, "web_search", return_value=[]):
+            generation._generate(db.claim_generation(self.sid))
+        _, draft = self.edit_draft()
+        draft["messages"][1]["reasoning"] = "Corrected thought"
+        before = self.payload_stats()
+        with self.assertRaises(ValueError):
+            db.save_edited_fork(self.sid, draft)
+        self.assertEqual(self.payload_stats(), before)
+        draft["tools"][0]["include"] = False
+        edited = db.save_edited_fork(self.sid, draft)
+        messages = db.visible_messages(edited["id"])
+        self.assertEqual(messages[1]["provenance"]["kind"], "manual")
+        self.assertEqual(messages[3]["provenance"]["kind"], "carried")
+        _, further = self.edit_draft(edited["id"])
+        further["messages"][0]["content"] = "Earlier correction"
+        carried = db.save_edited_fork(edited["id"], further)
+        manual = db.visible_messages(carried["id"])[1]
+        self.assertEqual(manual["provenance"]["kind"], "manual")
+        self.assertEqual(manual["reasoning"], "Corrected thought")
+        self.assertEqual(manual["provenance"]["source_reasoning"], "First thought")
+
+    def test_tool_thinking_edit_preserves_calls_results_and_original_request(self):
+        def reasoning_search(model, messages, params, *, tools=None):
+            if messages[-1]["role"] != "tool":
+                yield {"type": "reasoning", "text": "Original search thought"}
+            yield from search_stream(model, messages, params, tools=tools)
+
+        self.client.post(f"/sessions/{self.sid}/send", data={"content": "Find evidence", "web_search": "true"})
+        with patch.object(ollama, "chat_stream", side_effect=reasoning_search), \
+                patch.object(ollama, "web_search", return_value=[]):
+            generation._generate(db.claim_generation(self.sid))
+        original = db.list_generations(self.sid)[0]
+        _, draft = self.edit_draft()
+        draft["tools"][0]["reasoning"] = "Corrected search thought"
+        draft["messages"][-1]["include"] = False
+        before = self.payload_stats()
+        with self.assertRaises(ValueError):
+            db.save_edited_fork(self.sid, draft, send=True)
+        self.assertEqual(self.payload_stats(), before)
+        draft["tools"][0]["explicit"] = True
+        fork = db.save_edited_fork(self.sid, draft, send=True)
+        pending = db.list_generations(fork["id"])[0]
+        self.assertEqual(pending["messages"][2]["reasoning"], "Corrected search thought")
+        self.assertEqual(pending["trace"][0]["message"], original["trace"][0]["message"])
+        self.assertEqual(pending["trace"][1]["message"], original["trace"][1]["message"])
+        self.assertEqual(pending["trace"][0]["request"], original["trace"][0]["request"])
+        self.assertEqual(pending["trace"][0]["provenance"]["source_reasoning"], "Original search thought")
+        self.assertIsNone(pending["trace"][0]["usage"])
+        with patch.object(ollama, "chat_stream", side_effect=reasoning_search), \
+                patch.object(ollama, "web_search", side_effect=AssertionError("Saved results must not rerun")):
+            generation._generate(db.claim_generation(fork["id"]))
+        self.assertEqual(db.visible_messages(fork["id"])[-1]["total_tokens"], 37)
+        _, again = self.edit_draft(fork["id"])
+        again["tools"][0].update(reasoning="", explicit=True)
+        again["messages"][-1]["include"] = False
+        cleared = db.save_edited_fork(fork["id"], again, send=True)
+        cleared_job = db.list_generations(cleared["id"])[0]
+        self.assertNotIn("reasoning", cleared_job["messages"][2])
+        self.assertEqual(cleared_job["trace"][0]["provenance"]["before_reasoning"], "Corrected search thought")
+        self.assertEqual(cleared_job["trace"][0]["provenance"]["source_reasoning"], "Original search thought")
+        self.assertEqual(db.list_generations(self.sid)[0]["trace"], original["trace"])
+
+    def test_invalid_thinking_edits_are_rejected_before_creating_a_fork(self):
+        self.send("Question")
+        self.finish("Answer", reasoning="Thought")
+        _, draft = self.edit_draft()
+        before = self.payload_stats()
+        sessions = len(db.list_sessions(self.folder["id"]))
+        for index, value in ((0, "User cannot carry assistant reasoning"), (1, None), (1, [])):
+            invalid = json.loads(json.dumps(draft))
+            invalid["messages"][index]["reasoning"] = value
+            with self.subTest(index=index, value=value), self.assertRaises(ValueError):
+                db.save_edited_fork(self.sid, invalid)
+            self.assertEqual(self.payload_stats(), before)
+            self.assertEqual(len(db.list_sessions(self.folder["id"])), sessions)
+        invalid = json.loads(json.dumps(draft))
+        invalid["messages"][1].update(content="", reasoning="   ")
+        with self.assertRaises(ValueError):
+            db.save_edited_fork(self.sid, invalid)
+        self.assertEqual(self.payload_stats(), before)
+
+    def test_legacy_base_thinking_is_enriched_without_rewriting_historical_prompt(self):
+        self.send("First question")
+        self.finish("First answer", reasoning="First thought")
+        self.send("Second question")
+        job = db.claim_generation(self.sid)
+        legacy = {**job["request"], "messages": [
+            {key: value for key, value in message.items() if key != "reasoning"} for message in job["messages"]
+        ]}
+        with db._conn as conn:
+            legacy_id = payloads.store(conn, legacy)
+            conn.execute("UPDATE generations SET request_id = ?, base_request_id = ? WHERE user_message_id = ?",
+                         (legacy_id, legacy_id, job["user_message_id"]))
+        db.finish_generation(job, "Second answer", "Second thought", {"total_tokens": 5})
+        answer = db.visible_messages(self.sid)[-1]
+        original = db.get_message_generation(self.sid, answer["id"])
+        self.assertNotIn("reasoning", original["messages"][2])
+        db.update_session(self.sid, model="other-model", params_json='{"temperature":0.1}')
+        db.update_folder(self.folder["id"], "Renamed", "Different live system")
+        regenerated = db.regenerate_response(self.sid, answer["id"])
+        self.assertEqual(regenerated["messages"][2]["reasoning"], "First thought")
+        self.assertEqual(regenerated["model"], original["model"])
+        self.assertEqual(regenerated["params"], original["params"])
+        self.assertEqual(regenerated["messages"][0], original["messages"][0])
+        self.assertEqual(db.get_message_generation(self.sid, answer["id"])["messages"], original["messages"])
+
+    def test_fork_and_followup_use_selected_response_thinking(self):
+        self.send("Question")
+        first = self.finish("Same answer", reasoning="First version reasoning")
+        db.regenerate_response(self.sid, first["assistant_message_id"])
+        second = self.finish("Same answer", reasoning="Second version reasoning")
+        db.select_response_variant(self.sid, first["user_message_id"], first["assistant_message_id"])
+        fork = db.fork_session(self.sid, first["assistant_message_id"])
+        self.client.post(f'/sessions/{fork["id"]}/send', data={"content": "Follow up"})
+        self.assertEqual(db.list_generations(fork["id"])[-1]["messages"][2]["reasoning"], "First version reasoning")
+        db.select_response_variant(self.sid, first["user_message_id"], second["assistant_message_id"])
+        self.send("Different selected history")
+        self.assertEqual(db.list_generations(self.sid)[-1]["messages"][2]["reasoning"], "Second version reasoning")
+
+    def test_search_retry_and_event_fork_replay_saved_tool_thinking(self):
+        def reasoning_search(model, messages, params, *, tools=None):
+            if messages[-1]["role"] != "tool":
+                yield {"type": "reasoning", "text": "Plan before search"}
+            yield from search_stream(model, messages, params, tools=tools)
+
+        self.client.post(f"/sessions/{self.sid}/send", data={"content": "Research", "web_search": "true"})
+        with patch.object(ollama, "chat_stream", side_effect=reasoning_search), \
+                patch.object(ollama, "web_search", side_effect=httpx.ConnectError("offline")):
+            generation._generate(db.claim_generation(self.sid))
+        failed = db.list_generations(self.sid)[0]
+        self.assertEqual(failed["status"], "failed")
+        db.retry_generations(self.sid, web_search=True)
+        with patch.object(ollama, "chat_stream", side_effect=reasoning_search) as model, \
+                patch.object(ollama, "web_search", return_value=[]):
+            generation._generate(db.claim_generation(self.sid))
+            self.assertEqual(model.call_count, 1)
+            self.assertEqual(model.call_args.args[1][2]["reasoning"], "Plan before search")
+        saved = db.list_generations(self.sid)[0]
+        fork = db.fork_session(self.sid, saved["user_message_id"], event_index=1, trace_id=saved["trace_id"])
+        imported = db.list_generations(fork["id"])[0]
+        db.request_response(fork["id"], imported["user_message_id"], web_search=False)
+        with patch.object(ollama, "chat_stream", side_effect=reasoning_search) as model, \
+                patch.object(ollama, "web_search", side_effect=AssertionError("Do not repeat saved search")):
+            generation._generate(db.claim_generation(fork["id"]))
+            self.assertEqual(model.call_args.args[1][2]["reasoning"], "Plan before search")
+        self.assertEqual(db.get_message_generation(self.sid, saved["assistant_message_id"])["messages"],
+                         saved["messages"])
+
+    def test_old_ambiguous_reasoning_is_not_guessed_from_a_different_variant(self):
+        self.send("Question")
+        first = self.finish("Identical answer", reasoning="First reasoning")
+        db.regenerate_response(self.sid, first["assistant_message_id"])
+        self.finish("Identical answer", reasoning="Different reasoning")
+        self.send("Follow-up")
+        pending = db.claim_generation(self.sid)
+        legacy = {**pending["request"], "messages": [
+            {key: value for key, value in message.items() if key != "reasoning"} for message in pending["messages"]
+        ]}
+        with db._conn as conn:
+            legacy_id = payloads.store(conn, legacy)
+            conn.execute("UPDATE generations SET request_id = ?, base_request_id = ? WHERE user_message_id = ?",
+                         (legacy_id, legacy_id, pending["user_message_id"]))
+        db.finish_generation(pending, "Follow-up answer", "", None)
+        last = db.visible_messages(self.sid)[-1]
+        regenerated = db.regenerate_response(self.sid, last["id"])
+        self.assertNotIn("reasoning", regenerated["messages"][2])
+        self.assertEqual(regenerated["messages"][2]["content"], "Identical answer")
 
     def test_batch_edit_preserves_source_and_uses_manual_answers_in_future_context(self):
         self.send("Original question")
@@ -238,7 +713,7 @@ class AppTests(unittest.TestCase):
                          ["Edited question", "User-corrected answer", "Edited follow-up", "Carried answer"])
         self.assertEqual([message["provenance"]["kind"] for message in messages],
                          ["edited", "manual", "edited", "carried"])
-        self.assertIsNone(messages[1]["reasoning"])
+        self.assertEqual(messages[1]["reasoning"], "Original reasoning")
         self.assertIsNone(messages[1]["total_tokens"])
         self.assertEqual(messages[1]["provenance"]["source_reasoning"], "Original reasoning")
         self.assertEqual(messages[1]["provenance"]["source_usage"]["total_tokens"], 7)
@@ -251,6 +726,7 @@ class AppTests(unittest.TestCase):
         self.assertEqual([message["content"] for message in request["messages"][1:]],
                          ["Edited question", "User-corrected answer", "Edited follow-up",
                           "Carried answer", "Continue this context"])
+        self.assertEqual(request["messages"][2]["reasoning"], "Original reasoning")
 
     def test_edited_regeneration_uses_new_base_without_rewriting_original_prompt(self):
         self.send("Old input")
@@ -432,6 +908,10 @@ class AppTests(unittest.TestCase):
 
         def keep_searching(model, messages, params, *, tools=None):
             index = sum(message["role"] == "tool" for message in messages)
+            if not tools:
+                yield {"type": "content", "text": "Answer from the reexecuted searches"}
+                yield {"type": "done"}
+                return
             yield {"type": "done", "finish_reason": "tool_calls",
                    "tool_calls": [search_call(f"New query {index}", f"new-call-{index}")]}
 
@@ -439,7 +919,10 @@ class AppTests(unittest.TestCase):
                 patch.object(ollama, "web_search", return_value=[]) as search:
             generation._generate(db.claim_generation(call_fork["id"]))
             self.assertEqual(search.call_count, 8)
-        self.assertEqual(db.list_generations(call_fork["id"])[0]["status"], "failed")
+            self.assertEqual(search.call_args_list[0].args[0], "model-selected query")
+        completed = db.list_generations(call_fork["id"])[0]
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(completed["request"]["search_budget"], {"limit": 8, "remaining": 0})
 
     def test_retained_failed_tool_result_is_context_not_a_new_search_attempt(self):
         self.client.post(f"/sessions/{self.sid}/send", data={"content": "Original research", "web_search": "true"})
@@ -874,7 +1357,294 @@ class AppTests(unittest.TestCase):
         db.select_response_variant(self.sid, original["user_message_id"], alternate["assistant_message_id"])
         self.assertEqual(db.get_generation(self.sid, original["user_message_id"])["trace"], [])
 
-    def test_model_cannot_search_indefinitely_across_tool_rounds(self):
+    def test_search_batch_overflow_preserves_eight_results_and_finishes_with_exact_prompt(self):
+        self.client.post(f"/sessions/{self.sid}/send", data={"content": "Compare the evidence", "web_search": "true"})
+        base = db.list_generations(self.sid)[0]["base_request"]["messages"]
+        requests = []
+
+        def three_at_a_time(model, messages, params, *, tools=None):
+            requests.append(json.loads(json.dumps({"messages": messages, "tools": tools})))
+            count = sum(message["role"] == "tool" for message in messages)
+            if not tools:
+                yield {"type": "reasoning", "text": "Use only the gathered evidence."}
+                yield {"type": "content", "text": "Supported answer with remaining uncertainty"}
+                yield {"type": "done"}
+                return
+            yield {"type": "reasoning", "text": f"Research round {count // 3 + 1}"}
+            yield {"type": "done", "finish_reason": "tool_calls",
+                   "tool_calls": [search_call(f"query {index}", f"call-{index}")
+                                  for index in range(count + 1, count + 4)]}
+
+        def evidence(query, **kwargs):
+            return [{"title": query, "url": "https://example.org", "content": f"Evidence for {query}"}]
+
+        with patch.object(ollama, "chat_stream", side_effect=three_at_a_time), \
+                patch.object(ollama, "web_search", side_effect=evidence) as search:
+            generation._generate(db.claim_generation(self.sid))
+            self.assertEqual([call.args[0] for call in search.call_args_list],
+                             [f"query {index}" for index in range(1, 9)])
+        job = db.list_generations(self.sid)[0]
+        self.assertEqual(job["status"], "completed")
+        self.assertEqual(db.visible_messages(self.sid)[-1]["content"], "Supported answer with remaining uncertainty")
+        assistants = [event for event in job["trace"] if event["kind"] == "assistant"]
+        outcomes = [event for event in job["trace"] if event["kind"] == "tool"]
+        self.assertEqual([event["request"]["search_budget"] for event in assistants],
+                         [{"limit": 8, "remaining": remaining} for remaining in (8, 5, 2)])
+        self.assertEqual([message["reasoning"] for message in requests[-1]["messages"]
+                          if message["role"] == "assistant"],
+                         [f"Research round {index}" for index in range(1, 4)])
+        self.assertEqual([event["message"]["tool_call_id"] for event in outcomes],
+                         [f"call-{index}" for index in range(1, 10)])
+        self.assertEqual([event["status"] for event in outcomes], ["completed"] * 8 + ["rejected"])
+        for index, event in enumerate(outcomes[:8], 1):
+            self.assertEqual(json.loads(event["message"]["content"])["results"], evidence(f"query {index}"))
+        rejected = outcomes[-1]
+        self.assertNotIn("started_at", rejected)
+        error = json.loads(rejected["message"]["content"])
+        self.assertEqual(error["error_type"], "search_budget_exhausted")
+        self.assertFalse(error["executed"])
+        self.assertEqual(len(requests), 4)
+        for index, event in enumerate(assistants):
+            self.assertEqual(event["request"]["messages"], requests[index]["messages"])
+            self.assertEqual(event["request"]["tools"], requests[index]["tools"])
+            self.assertEqual(requests[index]["messages"][:len(base)], base)
+            self.assertNotEqual(requests[index]["messages"][-1]["role"], "system")
+        self.assertEqual(job["request"]["search_budget"], {"limit": 8, "remaining": 0})
+        self.assertTrue(job["request"]["search_permission"])
+        self.assertEqual(job["tools"], [])
+        self.assertEqual(requests[-1]["tools"], [])
+        self.assertEqual(job["messages"], requests[-1]["messages"])
+        self.assertEqual(requests[-1]["messages"][-1]["role"], "system")
+        self.assertTrue(requests[-1]["messages"][-1]["content"])
+        self.assertEqual(requests[-1]["messages"][-2], rejected["message"])
+        self.assertEqual(job["base_request"]["messages"], base)
+        prompt = self.client.get(
+            f'/sessions/{self.sid}/messages/{job["assistant_message_id"]}/prompt')
+        self.assertEqual(self.prompt_messages(prompt), requests[-1]["messages"])
+        for event in assistants:
+            prompt = self.client.get(
+                f'/sessions/{self.sid}/messages/{job["user_message_id"]}/events/'
+                f'{job["trace"].index(event)}/prompt?trace_id={job["trace_id"]}')
+            self.assertEqual(self.prompt_messages(prompt), event["request"]["messages"])
+        rejected_fork = db.fork_session(self.sid, job["user_message_id"],
+                                         event_index=len(job["trace"]) - 1, trace_id=job["trace_id"])
+        snapshot, draft = self.edit_draft(rejected_fork["id"])
+        self.assertTrue(all(group["complete"] for group in snapshot["tool_groups"]))
+        retained = db.save_edited_fork(rejected_fork["id"], draft, send=True, web_search=True)
+
+        def use_retained_evidence(model, messages, params, *, tools=None):
+            self.assertTrue(tools)
+            self.assertEqual(sum(message["role"] == "tool" for message in messages), 9)
+            self.assertNotEqual(messages[-1]["role"], "system")
+            yield {"type": "content", "text": "Answer using the retained evidence"}
+            yield {"type": "done"}
+
+        with patch.object(ollama, "chat_stream", side_effect=use_retained_evidence), \
+                patch.object(ollama, "web_search") as search:
+            generation._generate(db.claim_generation(retained["id"]))
+            search.assert_not_called()
+        retained_job = db.list_generations(retained["id"])[0]
+        self.assertEqual(retained_job["status"], "completed")
+        self.assertEqual(retained_job["request"]["search_budget"], {"limit": 8, "remaining": 8})
+        self.send("Continue without searching")
+        following = db.list_generations(self.sid)[-1]
+        self.assertNotIn(requests[-1]["messages"][-1], following["base_request"]["messages"])
+
+    def test_event_fork_preserves_budget_but_retained_edits_and_regeneration_reset_it(self):
+        self.client.post(f"/sessions/{self.sid}/send", data={"content": "Research", "web_search": "true"})
+
+        def four_at_a_time(model, messages, params, *, tools=None):
+            count = sum(message["role"] == "tool" for message in messages)
+            if not tools:
+                yield {"type": "content", "text": "Answer after eight searches"}
+                yield {"type": "done"}
+                return
+            yield {"type": "done", "finish_reason": "tool_calls",
+                   "tool_calls": [search_call(f"query {index}", f"source-{index}")
+                                  for index in range(count + 1, count + 5)]}
+
+        with patch.object(ollama, "chat_stream", side_effect=four_at_a_time), \
+                patch.object(ollama, "web_search", return_value=[]):
+            generation._generate(db.claim_generation(self.sid))
+        source = db.list_generations(self.sid)[0]
+        self.assertEqual(source["status"], "completed")
+        fork = db.fork_session(self.sid, source["user_message_id"], event_index=4, trace_id=source["trace_id"])
+        fork_job = db.list_generations(fork["id"])[0]
+        db.request_response(fork["id"], fork_job["user_message_id"], web_search=True)
+        _, draft = self.edit_draft()
+        draft["messages"][-1]["include"] = False
+        retained = db.save_edited_fork(self.sid, draft, send=True, web_search=True)
+        self.assertTrue(db.regenerate_response(self.sid, source["assistant_message_id"], web_search=True))
+
+        for sid, expected_remaining in ((fork["id"], 4), (retained["id"], 8), (self.sid, 8)):
+            with self.subTest(session=sid, remaining=expected_remaining):
+                requests = []
+
+                def spend_available_budget(model, messages, params, *, tools=None):
+                    requests.append(bool(tools))
+                    if not tools:
+                        yield {"type": "content", "text": "Answer from this branch"}
+                        yield {"type": "done"}
+                        return
+                    current = db.list_generations(sid)[0]
+                    self.assertEqual(current["request"]["search_budget"],
+                                     {"limit": 8, "remaining": expected_remaining})
+                    yield {"type": "done", "finish_reason": "tool_calls",
+                           "tool_calls": [search_call(f"fresh query {index}", f"fresh-{index}") for index in range(8)]}
+
+                with patch.object(ollama, "chat_stream", side_effect=spend_available_budget), \
+                        patch.object(ollama, "web_search", return_value=[]) as search:
+                    generation._generate(db.claim_generation(sid))
+                    self.assertEqual(search.call_count, expected_remaining)
+                completed = db.list_generations(sid)[0]
+                self.assertEqual(completed["status"], "completed")
+                self.assertEqual(requests, [True, False])
+                self.assertEqual(completed["request"]["search_budget"], {"limit": 8, "remaining": 0})
+                outcomes = [event for event in completed["trace"] if event["kind"] == "tool"]
+                self.assertEqual(sum(event["status"] == "rejected" for event in outcomes), 8 - expected_remaining)
+        self.assertEqual(db.get_message_generation(self.sid, source["assistant_message_id"])["trace"],
+                         source["trace"])
+
+    def test_exact_search_budget_final_model_failure_retries_without_fresh_searches(self):
+        self.client.post(f"/sessions/{self.sid}/send", data={"content": "Research", "web_search": "true"})
+        final_requests = []
+
+        def fail_final_answer(model, messages, params, *, tools=None):
+            if tools:
+                yield {"type": "done", "finish_reason": "tool_calls",
+                       "tool_calls": [search_call(f"query {index}", f"call-{index}") for index in range(8)]}
+                return
+            final_requests.append(json.loads(json.dumps(messages)))
+            self.assertEqual(messages[-1]["role"], "system")
+            self.assertEqual(sum(message["role"] == "tool" for message in messages), 8)
+            raise httpx.ConnectError("Final answer model unavailable")
+
+        with patch.object(ollama, "chat_stream", side_effect=fail_final_answer) as model, \
+                patch.object(ollama, "web_search", return_value=[]) as search:
+            generation._generate(db.claim_generation(self.sid))
+            self.assertEqual(search.call_count, 8)
+            self.assertEqual(model.call_count, 2)
+        failed = db.list_generations(self.sid)[0]
+        self.assertEqual(failed["status"], "failed")
+        self.assertFalse(any(event["status"] == "rejected" for event in failed["trace"]))
+        self.assertEqual(failed["request"]["search_budget"], {"limit": 8, "remaining": 0})
+        self.assertTrue(failed["request"]["search_permission"])
+        self.assertEqual(failed["tools"], [])
+        self.assertTrue(db.retry_generations(self.sid, web_search=True))
+
+        def answer_after_failure(model, messages, params, *, tools=None):
+            self.assertEqual(tools, [])
+            self.assertEqual(messages, final_requests[0])
+            yield {"type": "content", "text": "Recovered final answer"}
+            yield {"type": "done"}
+
+        with patch.object(ollama, "chat_stream", side_effect=answer_after_failure) as model, \
+                patch.object(ollama, "web_search") as search:
+            generation._generate(db.claim_generation(self.sid))
+            search.assert_not_called()
+            model.assert_called_once()
+        completed = db.list_generations(self.sid)[0]
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(completed["trace"], failed["trace"])
+        self.assertEqual(completed["request"]["search_budget"], {"limit": 8, "remaining": 0})
+
+    def test_retry_of_old_batch_limit_failure_executes_only_missing_eligible_calls(self):
+        self.client.post(f"/sessions/{self.sid}/send", data={"content": "Old research", "web_search": "true"})
+        old = db.claim_generation(self.sid)
+        calls = [search_call(f"saved query {index}", f"saved-{index}") for index in range(1, 10)]
+        db.record_tool_calls(old, {"role": "assistant", "content": "Saved search plan", "tool_calls": calls},
+                             "Saved reasoning", None)
+        for index in range(1, 7):
+            db.start_tool(old, f"saved-{index}")
+            db.finish_tool(old, f"saved-{index}", {
+                "query": f"saved query {index}", "max_results": 2,
+                "results": [{"title": "Saved source", "url": "https://example.org", "content": f"Saved evidence {index}"}],
+                "fetched_at": "2026-10-22",
+            })
+        db.interrupt_generations(self.sid, "Web search tool call limit exceeded", job=old)
+        failed = db.list_generations(self.sid)[0]
+        self.assertTrue(db.retry_generations(self.sid, web_search=True))
+
+        def finish_old_batch(model, messages, params, *, tools=None):
+            self.assertEqual(tools, [])
+            self.assertEqual(messages[-1]["role"], "system")
+            self.assertEqual(messages[2]["content"], "Saved search plan")
+            self.assertEqual(messages[2]["reasoning"], "Saved reasoning")
+            self.assertEqual(messages[2]["tool_calls"], calls)
+            outcomes = [message for message in messages if message["role"] == "tool"]
+            self.assertEqual([message["tool_call_id"] for message in outcomes],
+                             [f"saved-{index}" for index in range(1, 10)])
+            self.assertEqual(json.loads(outcomes[-1]["content"])["error_type"], "search_budget_exhausted")
+            yield {"type": "content", "text": "Recovered old research"}
+            yield {"type": "done"}
+
+        with patch.object(ollama, "chat_stream", side_effect=finish_old_batch) as model, \
+                patch.object(ollama, "web_search", return_value=[]) as search:
+            generation._generate(db.claim_generation(self.sid))
+            self.assertEqual([call.args[0] for call in search.call_args_list], ["saved query 7", "saved query 8"])
+            model.assert_called_once()
+        completed = db.list_generations(self.sid)[0]
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(completed["trace"][1:7], failed["trace"][1:7])
+        self.assertEqual(completed["request"]["search_budget"], {"limit": 8, "remaining": 0})
+
+    def test_invalid_attempts_share_the_search_budget_with_valid_calls(self):
+        self.client.post(f"/sessions/{self.sid}/send", data={"content": "Research", "web_search": "true"})
+
+        def mixed_rounds(model, messages, params, *, tools=None):
+            count = sum(message["role"] == "tool" for message in messages)
+            if not tools:
+                self.assertEqual(count, 9)
+                yield {"type": "content", "text": "Answer from four successful searches"}
+                yield {"type": "done"}
+                return
+            calls = [search_call(f"query {index}", f"mixed-{index}", 10 if index % 2 else 2)
+                     for index in range(count + 1, count + 4)]
+            yield {"type": "done", "finish_reason": "tool_calls", "tool_calls": calls}
+
+        with patch.object(ollama, "chat_stream", side_effect=mixed_rounds) as model, \
+                patch.object(ollama, "web_search", return_value=[]) as search:
+            generation._generate(db.claim_generation(self.sid))
+            self.assertEqual([call.args[0] for call in search.call_args_list],
+                             ["query 2", "query 4", "query 6", "query 8"])
+            self.assertEqual(model.call_count, 4)
+        completed = db.list_generations(self.sid)[0]
+        self.assertEqual(completed["status"], "completed")
+        outcomes = [event for event in completed["trace"] if event["kind"] == "tool"]
+        self.assertEqual(len(outcomes), 9)
+        for index, event in enumerate(outcomes, 1):
+            if index == 9:
+                self.assertEqual(json.loads(event["message"]["content"])["error_type"], "search_budget_exhausted")
+            elif index % 2:
+                self.assertEqual(json.loads(event["message"]["content"])["error_type"], "invalid_arguments")
+            else:
+                self.assertEqual(event["status"], "completed")
+        self.assertEqual(completed["request"]["search_budget"], {"limit": 8, "remaining": 0})
+
+    def test_oversized_batches_check_permissions_and_unknown_tools_before_any_search(self):
+        for allowed in (False, True):
+            with self.subTest(allowed=allowed):
+                sid = db.create_session(self.folder["id"], model="test-model")["id"]
+                self.client.post(f"/sessions/{sid}/send",
+                                 data={"content": "Research", "web_search": str(allowed).lower()})
+                calls = [search_call(f"query {index}", f"call-{index}") for index in range(9)]
+                if allowed:
+                    calls[-1]["function"]["name"] = "unoffered_tool"
+
+                def oversized_batch(model, messages, params, *, tools=None):
+                    self.assertEqual(bool(tools), allowed)
+                    yield {"type": "done", "finish_reason": "tool_calls", "tool_calls": calls}
+
+                with patch.object(ollama, "chat_stream", side_effect=oversized_batch) as model, \
+                        patch.object(ollama, "web_search") as search:
+                    generation._generate(db.claim_generation(sid))
+                    model.assert_called_once()
+                    search.assert_not_called()
+                failed = db.list_generations(sid)[0]
+                self.assertEqual(failed["status"], "failed")
+                self.assertFalse(any(event["status"] == "rejected" for event in failed["trace"]))
+
+    def test_provider_ignoring_tools_free_finalization_fails_once_and_can_retry(self):
         self.client.post(f"/sessions/{self.sid}/send", data={"content": "Research", "web_search": "true"})
 
         def keep_searching(model, messages, params, *, tools=None):
@@ -882,15 +1652,39 @@ class AppTests(unittest.TestCase):
             yield {"type": "done", "finish_reason": "tool_calls",
                    "tool_calls": [search_call(f"query {index}", f"call-{index}")]}
 
-        with patch.object(ollama, "chat_stream", side_effect=keep_searching), \
+        with patch.object(ollama, "chat_stream", side_effect=keep_searching) as model, \
                 patch.object(ollama, "web_search", return_value=[]) as search:
             generation._generate(db.claim_generation(self.sid))
             self.assertEqual(search.call_count, 8)
+            self.assertEqual(model.call_count, 9)
+            self.assertEqual(model.call_args.kwargs["tools"], [])
         job = db.list_generations(self.sid)[0]
         self.assertEqual(job["status"], "failed")
+        self.assertTrue(job["error"])
         self.assertIsNone(job["assistant_message_id"])
-        self.assertEqual(sum(event["kind"] == "tool" and event["status"] == "completed"
-                             for event in job["trace"]), 8)
+        outcomes = [event for event in job["trace"] if event["kind"] == "tool"]
+        self.assertEqual([event["status"] for event in outcomes], ["completed"] * 8 + ["rejected"])
+        self.assertEqual(json.loads(outcomes[-1]["message"]["content"])["error_type"], "search_budget_exhausted")
+        self.assertFalse(json.loads(outcomes[-1]["message"]["content"])["executed"])
+        self.assertNotIn("started_at", outcomes[-1])
+        self.assertTrue(db.retry_generations(self.sid, web_search=True))
+
+        def answer_on_retry(model, messages, params, *, tools=None):
+            self.assertEqual(tools, [])
+            self.assertEqual(messages[-1]["role"], "system")
+            self.assertEqual(sum(message["role"] == "tool" for message in messages), 9)
+            yield {"type": "content", "text": "Answer from the available sources"}
+            yield {"type": "done"}
+
+        with patch.object(ollama, "chat_stream", side_effect=answer_on_retry) as model, \
+                patch.object(ollama, "web_search") as search:
+            generation._generate(db.claim_generation(self.sid))
+            model.assert_called_once()
+            search.assert_not_called()
+        retried = db.list_generations(self.sid)[0]
+        self.assertEqual(retried["status"], "completed")
+        self.assertEqual(retried["trace"], job["trace"])
+        self.assertEqual(retried["request"]["search_budget"], {"limit": 8, "remaining": 0})
 
     def test_closed_tool_batches_pair_every_call_before_a_new_user_turn(self):
         for close in ("stop", "restart"):

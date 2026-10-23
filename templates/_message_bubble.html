@@ -28,8 +28,9 @@
   </div>
   {% if message.reasoning %}
   <details class="reasoning">
-    <summary>Thinking</summary>
+    <summary>Thinking{{ ' · manually edited' if message.provenance and message.reasoning != (message.provenance.source_reasoning or '') else ' · preserved source' if message.provenance else ' · saved output' }}</summary>
     <div class="reasoning-text">{{ message.reasoning }}</div>
+    <p class="muted">Saved {{ 'manual' if message.provenance and message.reasoning != (message.provenance.source_reasoning or '') else 'source' if message.provenance else 'model output' }} Thinking. Prompt shows whether it was included in a particular request.</p>
   </details>
   {% endif %}
   <div class="content">{{ message.content }}</div>

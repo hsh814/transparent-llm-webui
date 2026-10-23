@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 
 import inputs
 import payloads
-from tool_events import allowed_tools, api_messages, pending_calls
+from tool_events import allowed_tools, api_messages, pending_calls, round_request
 
 DB_PATH = Path(os.environ.get("CHAT_DB_PATH", Path(__file__).parent / "chat.db"))
 
@@ -794,7 +794,10 @@ def _history_messages(conn: sqlite3.Connection, rows: list[dict], *,
             ).fetchone()
             if variant and variant["trace_id"]:
                 history.extend(api_messages(store.get(variant["trace_id"]), include_failed=True))
-        history.append({"role": row["role"], "content": _message_api_content(row)})
+        message = {"role": row["role"], "content": _message_api_content(row)}
+        if row["role"] == "assistant" and row["reasoning"]:
+            message["reasoning"] = row["reasoning"]
+        history.append(message)
         if row["role"] == "user" and row["id"] != exclude_trace_user_id:
             pending = conn.execute(
                 "SELECT trace_id FROM generations WHERE user_message_id = ? AND assistant_message_id IS NULL",
@@ -805,15 +808,89 @@ def _history_messages(conn: sqlite3.Connection, rows: list[dict], *,
     return history
 
 
+def _enrich_base_reasoning(conn: sqlite3.Connection, user_id: int, request: dict) -> dict:
+    """Add recoverable Thinking without replacing any saved request context."""
+    if not any(message.get("role") == "assistant" and "reasoning" not in message
+               for message in request["messages"]):
+        return request
+    session_id = conn.execute("SELECT session_id FROM messages WHERE id = ?", (user_id,)).fetchone()[0]
+    store = payloads.Store(conn)
+    rows = _rows_to_dicts(conn.execute(
+        "SELECT m.*, v.user_message_id FROM messages m"
+        " LEFT JOIN response_variants v ON v.assistant_message_id = m.id"
+        " WHERE m.session_id = ? AND m.role IN ('user', 'assistant') ORDER BY m.id",
+        (session_id,),
+    ).fetchall())
+
+    def key(message: dict) -> str:
+        return json.dumps({name: value for name, value in message.items() if name != "reasoning"},
+                          sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+
+    users = {
+        row["id"]: key({"role": "user", "content": _message_api_content(_message(row, store))})
+        for row in rows if row["role"] == "user" and row["id"] <= user_id
+    }
+    saved_users = [key(message) for message in request["messages"] if message.get("role") == "user"]
+    # Matching the complete user prefix distinguishes repeated identical turns.
+    exact_turns = list(users) if saved_users == list(users.values()) else None
+    unique_turns = {}
+    for turn_id, user_key in users.items():
+        unique_turns[user_key] = turn_id if user_key not in unique_turns else None
+    candidates = {}
+
+    def remember(turn_id: int | None, message: dict, reasoning: str) -> None:
+        if turn_id in users:
+            candidates.setdefault((turn_id, key(message)), set()).add(reasoning or "")
+
+    previous_user = None
+    for row in rows:
+        if row["role"] == "user":
+            previous_user = row["id"]
+        else:
+            remember(row["user_message_id"] or previous_user,
+                     {"role": "assistant", "content": _message_api_content(_message(row, store))},
+                     row["reasoning"])
+    for row in conn.execute(
+        "SELECT user_message_id, trace_id FROM generations WHERE session_id = ?"
+        " UNION SELECT v.user_message_id, v.trace_id FROM response_variants v"
+        " JOIN messages m ON m.id = v.assistant_message_id WHERE m.session_id = ?",
+        (session_id, session_id),
+    ):
+        if row["user_message_id"] not in users or not row["trace_id"]:
+            continue
+        trace = store.get(row["trace_id"], exclude_keys=frozenset({"request"}))
+        for message in api_messages(trace, include_failed=True):
+            if message["role"] == "assistant":
+                remember(row["user_message_id"], message, message.get("reasoning", ""))
+    messages = []
+    turn = None
+    turn_index = 0
+    for message in request["messages"]:
+        if message.get("role") == "user":
+            turn = exact_turns[turn_index] if exact_turns is not None else unique_turns.get(key(message))
+            turn_index += 1
+        elif message.get("role") == "assistant" and "reasoning" not in message:
+            matches = candidates.get((turn, key(message)), set())
+            # Old snapshots have no row IDs. Conflicting identical outputs cannot
+            # safely be attributed to a particular historical response version.
+            if len(matches) == 1 and (reasoning := next(iter(matches))):
+                message = {**message, "reasoning": reasoning}
+        messages.append(message)
+    return {**request, "messages": messages}
+
+
 def _set_permission(conn: sqlite3.Connection, user_id: int, web_search: bool | None) -> None:
     row = conn.execute("SELECT * FROM generations WHERE user_message_id = ?", (user_id,)).fetchone()
     store = payloads.Store(conn)
     request = store.get(row["request_id"])
-    if web_search is not None:
-        request["tools"] = allowed_tools(web_search)
-    request["messages"] = store.get(row["base_request_id"])["messages"] + api_messages(store.get(row["trace_id"]))
-    conn.execute("UPDATE generations SET request_id = ? WHERE user_message_id = ?",
-                 (store.put(request), user_id))
+    if web_search is None:
+        web_search = request.get("search_permission", bool(request.get("tools")))
+    base = _enrich_base_reasoning(conn, user_id, store.get(row["base_request_id"]))
+    request = round_request(base, store.get(row["trace_id"]), web_search)
+    conn.execute(
+        "UPDATE generations SET request_id = ?, base_request_id = ? WHERE user_message_id = ?",
+        (store.put(request), store.put(base), user_id),
+    )
 
 
 def _new_generation(conn: sqlite3.Connection, session: dict, folder: dict,
@@ -913,9 +990,12 @@ def regenerate_response(session_id: int, assistant_message_id: int, *, web_searc
             raise ValueError("Web search is only available in Chat folders.")
         store = payloads.Store(conn)
         current = conn.execute("SELECT * FROM generations WHERE user_message_id = ?", (user_id,)).fetchone()
-        base = store.get(current["base_request_id"] or current["request_id"])
+        base = _enrich_base_reasoning(
+            conn, user_id, store.get(current["base_request_id"] or current["request_id"])
+        )
         if web_search is None:
-            base["tools"] = store.get(current["request_id"]).get("tools", [])
+            request = store.get(current["request_id"])
+            base["tools"] = allowed_tools(request.get("search_permission", bool(request.get("tools"))))
         else:
             base["tools"] = allowed_tools(web_search)
         base_id = store.put(base)
@@ -1089,8 +1169,8 @@ def _event_snapshot(conn: sqlite3.Connection, session_id: int, user_id: int,
     elif job["trace_id"] != trace_id or (variant and job["status"] == "completed"):
         raise ValueError("This search history changed. Reload before choosing an event.")
     trace = payloads.load(conn, trace_id)
-    if event_index >= len(trace) or trace[event_index]["status"] != "completed":
-        raise ValueError("Only completed search events can be selected.")
+    if event_index >= len(trace) or trace[event_index]["status"] not in ("completed", "rejected"):
+        raise ValueError("Only completed or rejected search events can be selected.")
     return job, trace
 
 
@@ -1162,6 +1242,7 @@ def _edit_snapshot(conn: sqlite3.Connection, session_id: int) -> dict:
         variant = by_answer.get(row["id"])
         messages.append({
             "id": row["id"], "role": row["role"], "content": row["content"],
+            "reasoning": (row["reasoning"] or "") if row["role"] == "assistant" else "",
             "position": position, "user_message_id": variant["user_message_id"] if variant else None,
             "provenance": provenance, "attachments": attachments,
         })
@@ -1196,7 +1277,7 @@ def _edit_snapshot(conn: sqlite3.Connection, session_id: int) -> dict:
                     result = matches[0]
                     message = result.get("message") or {}
                     complete = complete and (
-                        result.get("kind") == "tool" and result.get("status") in ("completed", "failed")
+                        result.get("kind") == "tool" and result.get("status") in ("completed", "rejected", "failed")
                         and message.get("role") == "tool" and message.get("tool_call_id") == call_id
                         and isinstance(message.get("content"), str)
                     )
@@ -1204,6 +1285,7 @@ def _edit_snapshot(conn: sqlite3.Connection, session_id: int) -> dict:
                 "key": f"{row['id']}:{start}", "user_message_id": row["id"],
                 "trace_id": trace_id, "position": position, "event_indexes": indexes,
                 "complete": bool(complete),
+                "reasoning": event.get("reasoning") or "",
                 "events": [{**trace[index], "event_index": index} for index in indexes],
             })
             position += 1
@@ -1218,13 +1300,15 @@ def edit_snapshot(session_id: int) -> dict:
 
 
 def _edited_provenance(store: payloads.Store, source: dict, session_id: int,
-                       kind: str, snapshot: dict | None) -> str:
+                       kind: str, snapshot: dict | None, edited_fields: list[str]) -> str:
     previous = store.get(source["provenance_id"]) if source.get("provenance_id") else {}
     request_id = snapshot.get("request_id") if snapshot else None
     trace_id = snapshot.get("trace_id") if snapshot else None
     provenance = {
         "kind": kind, "source_session_id": session_id, "source_message_id": source["id"],
         "source_content": source["content"],
+        "before_reasoning": source["reasoning"] or "",
+        "edited_fields": edited_fields,
         "source_request": previous.get("source_request") if previous else
                           (store.get(request_id) if request_id else None),
         "source_trace": previous.get("source_trace", []) if previous else
@@ -1264,28 +1348,39 @@ def save_edited_fork(session_id: int, draft: dict, *, send: bool = False,
             if (not isinstance(edit, dict) or type(edit.get("id")) is not int
                     or edit["id"] != original["id"] or type(edit.get("include")) is not bool
                     or not isinstance(edit.get("content"), str)
+                    or not isinstance(edit.get("reasoning"), str)
                     or not isinstance(edit.get("attachments"), list)):
                 raise ValueError("Invalid message edit or message order.")
+            if original["role"] != "assistant" and edit["reasoning"]:
+                raise ValueError("Only assistant messages may contain Thinking.")
             indexes = edit["attachments"]
             count = len(original["attachments"])
             if (any(type(index) is not int or not 0 <= index < count for index in indexes)
                     or indexes != sorted(set(indexes))):
                 raise ValueError("Attachment selections must be unique original indexes in order.")
             if edit["include"]:
-                if not edit["content"].strip() and (
-                    original["role"] != "user" or not indexes or snapshot["folder"]["type"] == "memo"
+                if not edit["content"].strip() and not (
+                    original["role"] == "assistant" and edit["reasoning"].strip()
+                ) and not (
+                    original["role"] == "user" and indexes and snapshot["folder"]["type"] != "memo"
                 ):
-                    raise ValueError("Included messages require text or a user attachment.")
+                    raise ValueError("Included messages require text, assistant Thinking, or a user attachment.")
                 included[original["id"]] = edit
             is_changed = (not edit["include"] or edit["content"] != original["content"]
+                          or edit["reasoning"] != original["reasoning"]
                           or indexes != list(range(count)))
             changed[original["id"]] = is_changed
             if is_changed:
                 first_change = min(first_change, original["position"])
         for choice, group in zip(choices, expected_tools):
             if (not isinstance(choice, dict) or choice.get("key") != group["key"]
-                    or type(choice.get("include")) is not bool or type(choice.get("explicit")) is not bool):
+                    or type(choice.get("include")) is not bool or type(choice.get("explicit")) is not bool
+                    or not isinstance(choice.get("reasoning"), str)):
                 raise ValueError("Invalid tool selection or tool group order.")
+            if choice["reasoning"] != group["reasoning"]:
+                if not group["complete"]:
+                    raise ValueError("Incomplete tool group Thinking cannot be edited.")
+                first_change = min(first_change, group["position"])
             if choice["include"]:
                 if not group["complete"]:
                     raise ValueError("Incomplete tool groups cannot be retained.")
@@ -1294,7 +1389,7 @@ def save_edited_fork(session_id: int, draft: dict, *, send: bool = False,
             else:
                 first_change = min(first_change, group["position"])
         for choice, group in zip(choices, expected_tools):
-            if choice["include"] and group["position"] > first_change and not choice["explicit"]:
+            if choice["include"] and group["position"] >= first_change and not choice["explicit"]:
                 raise ValueError("Explicitly select tool history to reuse it after a context change.")
         kept = [message for message in expected_messages if message["id"] in included]
         folder = snapshot["folder"]
@@ -1331,9 +1426,20 @@ def save_edited_fork(session_id: int, draft: dict, *, send: bool = False,
                 if group["trace_id"] not in source_traces:
                     source_traces[group["trace_id"]] = store.get(group["trace_id"])
                 trace = source_traces[group["trace_id"]]
-                retained.setdefault(group["user_message_id"], []).extend(
-                    {**trace[index], "retained": True} for index in group["event_indexes"]
-                )
+                events = [{**trace[index], "retained": True} for index in group["event_indexes"]]
+                if choice["reasoning"] != group["reasoning"]:
+                    event = events[0]
+                    previous = event.get("provenance") or {}
+                    event["provenance"] = {
+                        "kind": "manual", "source_session_id": session_id,
+                        "source_user_message_id": group["user_message_id"],
+                        "source_event_index": group["event_indexes"][0],
+                        "before_reasoning": group["reasoning"],
+                        "source_reasoning": previous.get("source_reasoning", group["reasoning"]),
+                        "source_usage": previous.get("source_usage", event.get("usage")),
+                    }
+                    event.update(reasoning=choice["reasoning"], usage=None)
+                retained.setdefault(group["user_message_id"], []).extend(events)
         ids, copied_rows = {}, []
         for original in expected_messages:
             old_id = original["id"]
@@ -1341,7 +1447,8 @@ def save_edited_fork(session_id: int, draft: dict, *, send: bool = False,
                 continue
             edit, row = included[old_id], raw[old_id]
             copied = {key: value for key, value in row.items() if key != "id"}
-            copied.update(session_id=fork_id, content=edit["content"])
+            copied.update(session_id=fork_id, content=edit["content"],
+                          reasoning=edit["reasoning"] if row["role"] == "assistant" else row["reasoning"])
             attachments = store.get(row["attachments_id"]) if row["attachments_id"] else []
             selected_attachments = [attachments[index] for index in edit["attachments"]]
             if changed[old_id]:
@@ -1357,9 +1464,16 @@ def save_edited_fork(session_id: int, draft: dict, *, send: bool = False,
             )
             if kind:
                 historical = variants.get(old_id) if row["role"] == "assistant" else jobs.get(old_id)
-                copied["provenance_id"] = _edited_provenance(store, row, session_id, kind, historical)
+                previous = store.get(row["provenance_id"]) if row.get("provenance_id") else {}
+                if previous.get("kind") == "manual" and kind == "carried":
+                    kind = "manual"
+                edited_fields = [field for field in ("content", "reasoning")
+                                 if edit[field] != original[field]]
+                copied["provenance_id"] = _edited_provenance(
+                    store, row, session_id, kind, historical, edited_fields
+                )
             if kind == "manual":
-                for key in ("reasoning", "model", "reasoning_effort",
+                for key in ("model", "reasoning_effort",
                             "prompt_tokens", "completion_tokens", "total_tokens"):
                     copied[key] = None
             columns = ", ".join(copied)
@@ -1489,7 +1603,9 @@ def fork_session(session_id: int, message_id: int, *, event_index: int | None = 
                 copied.update(status="idle", content="", reasoning="", error=None)
                 snapshot = event_job if original["user_message_id"] == message_id and event_job else original
                 base = store.get(snapshot["base_request_id"] or snapshot["request_id"])
-                base = _clean_base(conn, original["user_message_id"], base)
+                base = (_enrich_base_reasoning(conn, original["user_message_id"], base)
+                        if snapshot["base_request_id"] else
+                        _clean_base(conn, original["user_message_id"], base))
                 base["tools"] = []
                 trace = event_trace[:event_index + 1] if event_job and original["user_message_id"] == message_id else []
                 copied["base_request_id"] = store.put(base)
@@ -1500,8 +1616,10 @@ def fork_session(session_id: int, message_id: int, *, event_index: int | None = 
                 copied.update(status="completed", content=answer["content"],
                               reasoning=answer["reasoning"] or "", error=None)
                 if variant is None or variant["request_id"] is None:
-                    base = _clean_base(conn, original["user_message_id"],
-                                       store.get(original["base_request_id"] or original["request_id"]))
+                    base = store.get(original["base_request_id"] or original["request_id"])
+                    base = (_enrich_base_reasoning(conn, original["user_message_id"], base)
+                            if original["base_request_id"] else
+                            _clean_base(conn, original["user_message_id"], base))
                     copied.update(request_id=store.put(base), base_request_id=store.put(base),
                                   trace_id=store.put([]))
             columns = ", ".join(copied)
@@ -1687,7 +1805,7 @@ def _save_trace(conn: sqlite3.Connection, row: sqlite3.Row, store: payloads.Stor
                 trace: list[dict], *, clear_partial: bool = False) -> None:
     request = store.get(row["request_id"])
     base = store.get(row["base_request_id"])
-    request["messages"] = base["messages"] + api_messages(trace)
+    request = round_request(base, trace, request.get("search_permission", bool(request.get("tools"))))
     conn.execute(
         "UPDATE generations SET request_id = ?, trace_id = ?"
         + (", content = '', reasoning = ''" if clear_partial else "")
@@ -1695,6 +1813,19 @@ def _save_trace(conn: sqlite3.Connection, row: sqlite3.Row, store: payloads.Stor
         (store.put(request), store.put(trace), row["user_message_id"]),
     )
     payloads.collect(conn)
+
+
+def prepare_model_request(job: dict) -> dict | None:
+    """CAS and persist the exact offered budget/tools before contacting the model."""
+    with _lock, _get_conn() as conn:
+        row = _running_job(conn, job)
+        if row is None:
+            return None
+        store = payloads.Store(conn)
+        _save_trace(conn, row, store, store.get(row["trace_id"]))
+        return _generation(conn.execute(
+            "SELECT * FROM generations WHERE user_message_id = ?", (job["user_message_id"],),
+        ).fetchone(), store)
 
 
 def record_tool_calls(job: dict, message: dict, reasoning: str, usage: dict | None) -> bool:
@@ -1743,6 +1874,37 @@ def start_tool(job: dict, call_id: str) -> bool:
             trace.append(event)
         else:
             event["origin"] = trace[existing]["origin"]
+            trace[existing] = event
+        _save_trace(conn, row, store, trace)
+        return True
+
+
+def reject_tool(job: dict, call_id: str, error: str, *, error_type: str = "invalid_arguments") -> bool:
+    """Resolve an unexecuted call without recording a running search or contacting it."""
+    with _lock, _get_conn() as conn:
+        row = _running_job(conn, job)
+        if row is None:
+            return False
+        store = payloads.Store(conn)
+        trace = store.get(row["trace_id"])
+        call = next((call for call in pending_calls(trace) if call["id"] == call_id), None)
+        if call is None:
+            return False
+        origin = next(event["origin"] for event in trace if event["kind"] == "assistant"
+                      and any(item["id"] == call_id for item in event["message"]["tool_calls"]))
+        result = {"error": error, "error_type": error_type, "executed": False}
+        event = {
+            "kind": "tool", "status": "rejected", "origin": origin, "call_id": call_id,
+            "name": call["function"]["name"], "arguments": call["function"]["arguments"],
+            "rejected_at": datetime.now(timezone.utc).isoformat(), "error": error,
+            "message": {"role": "tool", "tool_call_id": call_id, "name": call["function"]["name"],
+                        "content": json.dumps(result, ensure_ascii=False)},
+        }
+        existing = next((index for index, old in enumerate(trace)
+                         if old["kind"] == "tool" and old["call_id"] == call_id), None)
+        if existing is None:
+            trace.append(event)
+        else:
             trace[existing] = event
         _save_trace(conn, row, store, trace)
         return True

@@ -112,12 +112,12 @@ input.title-input:hover, input.title-input:focus { border-bottom-color: var(--bo
 .tool-timeline + .message, .generation-progress { margin-top: 18px; }
 .tool-event.message { border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 9px; padding: 12px 14px; font-size: 12px; overflow-wrap: anywhere; background: var(--surface); }
 .tool-event.tool-result { border-left-color: #90a898; }
-.tool-event[data-event-status="failed"] { border-left-color: var(--danger); }
+.tool-event[data-event-status="failed"], .tool-event[data-event-status="rejected"] { border-left-color: var(--danger); }
 .tool-event .message-meta { margin-bottom: 8px; }
 .tool-query { margin: 8px 0; font-size: 13px; }
 .tool-query span { font-weight: 550; }
 .tool-request + .tool-request { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); }
-.tool-arguments pre { white-space: pre-wrap; overflow-wrap: anywhere; margin-bottom: 0; }
+.tool-arguments pre, .tool-thinking-source pre { white-space: pre-wrap; overflow-wrap: anywhere; margin-bottom: 0; }
 .included-trace-note, .legacy-search-note { padding: 10px 12px; border-radius: 7px; background: var(--accent-soft); font-size: 11px; }
 .retained-response-note { margin: 18px 0 12px; }
 .tool-safety-note { font-size: 10px; margin-bottom: 0; }
@@ -273,15 +273,16 @@ input.title-input:hover, input.title-input:focus { border-bottom-color: var(--bo
 .batch-editor-header, .batch-editor-rows, .batch-preview { padding: 20px 24px; }
 .batch-editor-header { border-bottom: 1px solid var(--border); }
 .batch-editor-header h2 { margin: 0 0 8px; font-size: 20px; }
-.batch-editor-header p, .batch-tool-row p { margin: 8px 0; font-size: 12px; line-height: 1.6; }
+.batch-editor-header p, .batch-tool-row p, .batch-thinking-note { margin: 8px 0; font-size: 12px; line-height: 1.6; }
 .batch-editor-rows { display: grid; gap: 16px; }
 .batch-message-row, .batch-tool-row { padding: 14px; border: 1px solid var(--border); border-radius: 8px; min-width: 0; }
 .batch-row-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; font-size: 12px; margin-bottom: 10px; }
 .batch-row-heading label { font-weight: 600; }
 .batch-row-state, .batch-tool-state { color: var(--muted); text-align: right; }
-.batch-content { display: block; width: 100%; box-sizing: border-box; min-height: 90px; resize: vertical; font: inherit; line-height: 1.6; }
+.batch-content, .batch-reasoning, .batch-tool-reasoning { display: block; width: 100%; box-sizing: border-box; min-height: 90px; resize: vertical; font: inherit; line-height: 1.6; }
+.batch-thinking-label { display: block; margin: 12px 0 6px; font-size: 12px; font-weight: 600; }
 .batch-excluded { background: #f2f3f0; }
-.batch-excluded .batch-content { opacity: .65; }
+.batch-excluded .batch-content, .batch-excluded .batch-reasoning { opacity: .65; }
 .batch-attachments { border: 0; padding: 8px 0 0; margin: 8px 0 0; display: grid; gap: 8px; font-size: 12px; }
 .batch-attachments label { overflow-wrap: anywhere; }
 .batch-tool-row { border-style: dashed; }
@@ -303,5 +304,5 @@ input.title-input:hover, input.title-input:focus { border-bottom-color: var(--bo
   .batch-editor-actions > div { gap: 8px; }
   .batch-editor-actions button { flex: 1; }
   .batch-row-heading { flex-wrap: wrap; gap: 8px; }
-  .batch-content { font-size: 16px; }
+  .batch-content, .batch-reasoning, .batch-tool-reasoning { font-size: 16px; }
 }

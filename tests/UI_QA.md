@@ -1,5 +1,29 @@
 # Browser QA inventory
 
+## Search budget finalization
+
+- Verified 103 offline regressions. Budget coverage includes 3+3+3 requests executing only the first eight, exact-eight exhaustion, mixed valid/invalid attempts, saved hard-limit failures and final-model failures on Retry, permissions and unsupported-tool preflight, event-fork prefixes, edited retained results, regeneration reset, and finite failure when a provider ignores the tools-free final-answer instruction.
+- A throwaway `httpx.MockTransport` smoke exercised the production HTTP adapters and worker with remaining budgets 8, 5, 2, then 0: four model requests, eight search requests, and one paired `search_budget_exhausted` result with `executed: false`. The last model request omitted tools, included the explicit final-answer system instruction and saved Thinking, and completed an answer. Each saved Prompt matched the actual outgoing messages/tools. The finalization instruction did not leak into the next user turn.
+- Interactive Chromium exercised the same 3+3+3 workflow through the real UI and isolated preview provider. The timeline showed each round's budget, eight completed searches, the ninth unexecuted call, final-answer mode, and a completed answer. The search-permission checkbox stayed enabled independently of exhaustion. The exact Prompt showed zero budget, enabled permission, no offered tools, and the app-authored instruction.
+- Desktop and 320px views showed the budget outcome and final-answer notice without horizontal overflow; browser errors were empty. Reviewed artifacts: `test-results/search-budget-aPUqR6/budget-desktop.png`, `budget-mobile.png`, and `budget-prompt.png`. No real Ollama request or user-database mutation was made.
+
+## Search argument recovery
+
+- Verified 97 offline regressions. New cases cover two invalid `max_results: 10` calls corrected to five, invalid query/types/extra fields, mixed valid/invalid batches, the omitted-result default, old failed-call Retry, continuation failures, fine-grained and edited forks, stale attempts, permission boundaries, and the eight-call limit including rejections.
+- A throwaway `httpx.MockTransport` smoke exercised the production model/search HTTP adapters and worker: three model requests, exactly one search request with `max_results: 5`, the original `10` preserved, and a separate paired `invalid_arguments` tool reply with `executed: false`. Saved round Prompts matched outgoing messages, including Thinking. No real Ollama request was made.
+- Interactive Chromium exercised rejection → corrected call → saved source → answer with no generation failure. The correction round's Prompt contained the unchanged original call, its Thinking, and the validation tool reply. Forking through the rejection and continuing with search permission off produced an answer without rerunning the rejected call or including the later search.
+- Desktop and 320px screenshots show the rejected search in its chronological position, explicitly marked not executed, with no horizontal overflow. Artifacts: `test-results/search-recovery-eBJcqM/validation-desktop.png` and `validation-mobile.png`. Browser errors were empty. All preview sessions used a temporary database; the user's database was untouched.
+
+## Thinking replay and editing
+
+- Verified 89 offline regressions and 79 repeatable browser checks. Sources, forks, request snapshots, and test servers used isolated databases; no real Ollama request was made.
+- Worker regressions exercise Thinking across multiple search rounds and the next user turn, selected-version/fork context, retry and event-fork continuation, Thinking-only edits and answers, clearing, repeated provenance after source deletion, downstream tool invalidation, unchanged call/result pairs, and atomic rejection of invalid edits.
+- Older saved bases gain recoverable Thinking only in newly requested work. Tests preserve the exact old Prompt and original model/settings, and reject guessing between identical answers with conflicting Thinking.
+- A throwaway `httpx.MockTransport` smoke exercised the production HTTP adapter and worker: three model HTTP requests, separate `reasoning` in the tool continuation, both edited tool and final Thinking in the next turn, and saved Prompt exactly matching the outgoing messages. Incoming `reasoning_content` was captured and replayed using Ollama's outgoing `reasoning` field.
+- Interactive Chromium used a two-round search conversation. Editing the first tool's Thinking excluded both affected batches until the first was explicitly reselected; editing the final Thinking in the same fork retained its unchanged answer text. The next request included only that selected batch and both edited Thinking fields. Source inspection showed current, immediate-before, and original generated Thinking separately.
+- At 320px, the Thinking field and sticky save controls were visible together. Clearing the final answer's Thinking and using Save & send removed that field from the outgoing assistant message while retaining the selected tool's Thinking, with no duplicate user input. Browser errors were empty.
+- Reviewed screenshots: `test-results/browser-dZHcUb/batch-editor-desktop.png`, `batch-editor-mobile.png`, `thinking-editor-desktop.png`, and `thinking-editor-mobile.png`. The repeated suite also verifies HTML/whitespace preservation without script execution, exact historical Prompt, and manual attribution without fabricated usage.
+
 ## Batch-edit forks
 
 - Verified 80 offline regressions and 74 repeatable browser checks with isolated databases and simulated model/search responses. Reviewed desktop and 320px editor screenshots in `test-results/browser-kMNSsv/`.

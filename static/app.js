@@ -175,11 +175,13 @@
         const row = $(`[data-message-id="${message.id}"]`, form);
         return {id: message.id, include: $('.batch-include-message', row).checked,
           content: $('.batch-content', row).value,
+          reasoning: $('.batch-reasoning', row)?.value ?? '',
           attachments: $$('.batch-attachment:checked', row).map(input => Number(input.dataset.index))};
       }),
       tools: snapshot.tool_groups.map(group => {
         const row = $$('.batch-tool-row', form).find(element => element.dataset.toolKey === group.key);
-        return {key: group.key, include: $('.batch-include-tool', row).checked, explicit: row._explicitChoice !== undefined};
+        return {key: group.key, include: $('.batch-include-tool', row).checked,
+          reasoning: $('.batch-tool-reasoning', row).value, explicit: row._explicitChoice !== undefined};
       }),
     };
   }
@@ -194,12 +196,14 @@
       const include = $('.batch-include-message', row).checked;
       const attachments = $$('.batch-attachment:checked', row).map(input => Number(input.dataset.index));
       const edited = include && ($('.batch-content', row).value !== message.content
+        || ($('.batch-reasoning', row)?.value ?? '') !== message.reasoning
         || attachments.join(',') !== message.attachments.map(attachment => attachment.index).join(','));
       if (!include || edited) firstChange = Math.min(firstChange, message.position);
       if (edited) changed++;
       if (!include) excluded++;
       row.classList.toggle('batch-excluded', !include);
       $('.batch-content', row).disabled = !include;
+      if ($('.batch-reasoning', row)) $('.batch-reasoning', row).disabled = !include;
       $$('.batch-attachment', row).forEach(input => { input.disabled = !include; });
       return {message, row, include, edited};
     });
@@ -207,24 +211,27 @@
     const groups = snapshot.tool_groups.map(group => {
       const row = $$('.batch-tool-row', form).find(element => element.dataset.toolKey === group.key);
       const available = group.complete && includedUsers.has(group.user_message_id);
-      if (!available || row._explicitChoice === false) firstChange = Math.min(firstChange, group.position);
-      return {group, row, available};
+      const edited = $('.batch-tool-reasoning', row).value !== group.reasoning;
+      if (!available || edited || row._explicitChoice === false) firstChange = Math.min(firstChange, group.position);
+      return {group, row, available, edited};
     });
     let keptTools = 0;
-    groups.sort((a, b) => a.group.position - b.group.position).forEach(({group, row, available}) => {
+    groups.sort((a, b) => a.group.position - b.group.position).forEach(({group, row, available, edited}) => {
       const input = $('.batch-include-tool', row);
       input.disabled = !available;
+      $('.batch-tool-reasoning', row).disabled = !available;
       input.checked = available && (row._explicitChoice ?? (group.position < firstChange));
       if (!input.checked) firstChange = Math.min(firstChange, group.position);
       else keptTools++;
       row.classList.toggle('batch-excluded', !input.checked);
       $('.batch-tool-state', row).textContent = !group.complete ? 'Incomplete — cannot reuse'
-        : !available ? 'Anchor user excluded' : input.checked ? (row._explicitChoice === true ? 'Explicit reuse · not rerun' : 'Unchanged history · not rerun')
+        : !available ? 'Anchor user excluded' : input.checked ? (edited ? 'Manual Thinking · explicit reuse · not rerun' : row._explicitChoice === true ? 'Explicit reuse · not rerun' : 'Unchanged history · not rerun')
         : 'Excluded' + (row._explicitChoice === undefined ? ' after context change' : ' by choice');
     });
     let carried = 0;
     const preview = $('#batch-preview-list', form);
     preview.replaceChildren();
+    const previewItems = [];
     states.forEach(({message, row, include, edited}) => {
       const isCarried = include && !edited && message.role === 'assistant' && message.position > firstChange;
       if (isCarried) carried++;
@@ -233,9 +240,19 @@
       $('.batch-row-state', row).textContent = label;
       if (!include) return;
       const item = document.createElement('li');
-      item.textContent = `${message.role} · ${label}: ${$('.batch-content', row).value.slice(0, 140) || '[attachment-only input]'}`;
-      preview.append(item);
+      const content = $('.batch-content', row).value;
+      const reasoning = $('.batch-reasoning', row)?.value ?? '';
+      item.textContent = `${message.role} · ${label}: ${content.slice(0, 140) || (reasoning.trim() ? '[Thinking-only response]' : message.role === 'user' ? '[attachment-only input]' : '[empty text]')}${reasoning ? ` · Thinking: ${reasoning.slice(0, 140)}` : ''}`;
+      previewItems.push({position: message.position, item});
     });
+    groups.forEach(({group, row, edited}) => {
+      if (!$('.batch-include-tool', row).checked) return;
+      const item = document.createElement('li');
+      const reasoning = $('.batch-tool-reasoning', row).value;
+      item.textContent = `Tool batch · ${edited ? 'Manual Thinking · explicit reuse' : 'Reused history'} · calls/results unchanged${reasoning ? ` · Thinking: ${reasoning.slice(0, 140)}` : ' · no Thinking'}`;
+      previewItems.push({position: group.position, item});
+    });
+    previewItems.sort((a, b) => a.position - b.position).forEach(({item}) => preview.append(item));
     const kept = states.filter(state => state.include);
     const canSend = form.dataset.mode !== 'memo' && kept.at(-1)?.message.role === 'user';
     $('#batch-editor-send', form).disabled = !canSend;
@@ -243,7 +260,8 @@
       ? 'Save & send queues only the final included user request. Earlier answers and reused tools are not rerun.'
       : form.dataset.mode === 'memo' ? 'Memo only saves notes; it never calls a model.'
       : 'Save as fork is available. To send, the last included message must be a user request.';
-    $('#batch-editor-summary', form).textContent = `${kept.length} messages kept · ${changed} edited · ${excluded} excluded · ${carried} carried answers · ${keptTools}/${groups.length} tool batches reused. Saving creates one independent fork.`;
+    const changedTools = groups.filter(({edited}) => edited).length;
+    $('#batch-editor-summary', form).textContent = `${kept.length} messages kept · ${changed} edited · ${excluded} excluded · ${carried} carried answers · ${keptTools}/${groups.length} tool batches reused · ${changedTools} tool Thinking edited. Saving creates one independent fork.`;
     $('[name="draft"]', form).value = JSON.stringify(editorDraft(form));
   }
   function closeEditor(dialog) {
@@ -261,6 +279,12 @@
     dialog._opener = document.activeElement;
     dialog.addEventListener('cancel', event => { event.preventDefault(); closeEditor(dialog); });
     dialog.addEventListener('input', event => {
+      if (event.target.matches('.batch-reasoning, .batch-tool-reasoning')) {
+        const position = Number(event.target.closest('[data-position]').dataset.position);
+        $$('.batch-tool-row', form).forEach(row => {
+          if (Number(row.dataset.position) >= position) row._explicitChoice = undefined;
+        });
+      }
       if (event.target.matches('.batch-include-tool')) event.target.closest('.batch-tool-row')._explicitChoice = event.target.checked;
       updateEditor(form);
     });
@@ -271,8 +295,11 @@
     updateEditor(form);
     dialog.showModal();
     const focus = dialog.dataset.focusMessage;
-    const textarea = focus ? $(`#batch-content-${focus}`, dialog) : $('.batch-content', dialog);
-    (textarea || $('.batch-editor-cancel', dialog)).focus();
+    const toolRow = dialog.dataset.focusTool
+      ? $$('.batch-tool-row', dialog).find(row => row.dataset.toolKey === dialog.dataset.focusTool) : null;
+    const textarea = toolRow ? $('.batch-tool-reasoning', toolRow)
+      : focus ? $(`#batch-content-${focus}`, dialog) : $('.batch-content', dialog);
+    (textarea && !textarea.disabled ? textarea : $('.batch-editor-cancel', dialog)).focus();
   }
   function setEditorBusy(form, busy) {
     form._busy = busy;

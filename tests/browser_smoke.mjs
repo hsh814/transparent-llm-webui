@@ -339,6 +339,8 @@ try {
   const editPrompt = await context.newPage();
   await editPrompt.goto(base + await page.locator('.message[data-message-role="assistant"] a[href$="/prompt"]').getAttribute('href'));
   const originalEditRequest = JSON.parse(await editPrompt.locator('#prompt-messages').textContent());
+  check('tool continuation includes its saved Thinking separately from content',
+    originalEditRequest.find(message => message.tool_calls)?.reasoning === 'Choosing a focused search query.');
   await page.locator('.composer textarea').fill('Unsent source draft');
   const sessionsBeforeEdit = await page.locator('.session-item').count();
   await page.getByRole('button', { name: 'Edit messages', exact: true }).click();
@@ -358,6 +360,8 @@ try {
   await page.locator('#batch-editor[open]').waitFor();
   await page.locator('.batch-message-row[data-role="user"] .batch-content').fill('[no-search] Edited research question');
   await page.locator('.batch-message-row[data-role="assistant"] .batch-content').fill('Human-corrected response.');
+  const editedThinking = '  Human-corrected Thinking.\n<script>window.thinkingExecuted = true</script>\n';
+  await page.locator('.batch-message-row[data-role="assistant"] .batch-reasoning').fill(editedThinking);
   await page.screenshot({ path: path.join(artifacts, 'batch-editor-desktop.png'), scale: 'css' });
   await page.locator('#batch-editor button[name="intent"][value="save"]').click();
   await settle(page);
@@ -369,10 +373,10 @@ try {
     && await page.locator('.message[data-message-role="assistant"] .content').textContent() === 'Human-corrected response.'
     && await page.locator('[data-generation-status="queued"], [data-generation-status="running"]').count() === 0
     && await page.locator('.tool-event').count() === 0);
-  check('manual answer exposes provenance without fabricated token or reasoning attribution',
+  check('manual answer retains explicitly edited Thinking without fabricated token attribution',
     await page.locator('.message[data-message-role="assistant"] .provenance-badge').isVisible()
     && await page.locator('.message[data-message-role="assistant"] .badge-usage').count() === 0
-    && await page.locator('.message[data-message-role="assistant"] .reasoning').count() === 0);
+    && await page.locator('.message[data-message-role="assistant"] .reasoning-text').textContent() === editedThinking);
   await editPrompt.goto(base + await page.locator('.message[data-message-role="assistant"] a[href$="/prompt"]').getAttribute('href'));
   check('manual answer keeps its actual historical Prompt',
     JSON.stringify(JSON.parse(await editPrompt.locator('#prompt-messages').textContent())) === JSON.stringify(originalEditRequest));
@@ -387,6 +391,12 @@ try {
       ['assistant', 'Human-corrected response.'],
       ['user', '[instant] Continue edited history'],
     ]));
+  check('edited Thinking is a separate field in the next request, not answer text',
+    editedFollowup[1].reasoning === editedThinking
+    && !await page.evaluate(() => window.thinkingExecuted));
+  check('Prompt visibly exposes transmitted Thinking without executing its HTML',
+    await editPrompt.locator('.prompt-reasoning').textContent().then(text => text.includes(editedThinking))
+    && !await editPrompt.evaluate(() => window.thinkingExecuted));
   await page.goto(editSourceURL);
   check('source input and composer draft survive saving and using the fork',
     await page.locator('.message[data-message-role="user"] .content').textContent() === editSourceText
@@ -395,6 +405,10 @@ try {
   await page.getByRole('button', { name: 'Edit messages', exact: true }).click();
   await page.locator('#batch-editor[open]').waitFor();
   await page.locator('.batch-message-row[data-role="user"] .batch-content').fill('[no-search] Explicitly reuse these sources');
+  const editedSearchThinking = 'Corrected search reasoning; keep the recorded results.';
+  await page.locator('.batch-tool-reasoning').fill(editedSearchThinking);
+  check('edited tool Thinking requires explicit reuse of its complete batch',
+    !await page.locator('.batch-include-tool').isChecked());
   await page.locator('.batch-include-tool').check();
   await page.locator('.batch-message-row[data-role="assistant"] .batch-include-message').uncheck();
   check('excluding the final answer enables an explicit send without fresh search',
@@ -412,6 +426,10 @@ try {
     JSON.stringify(reusedRequest.filter(message => message.role === 'tool')) ===
     JSON.stringify(originalEditRequest.filter(message => message.role === 'tool'))
     && reusedRequest.find(message => message.role === 'user').content === '[no-search] Explicitly reuse these sources');
+  check('edited tool Thinking reaches the model while original calls remain paired',
+    reusedRequest.find(message => message.tool_calls)?.reasoning === editedSearchThinking
+    && JSON.stringify(reusedRequest.find(message => message.tool_calls)?.tool_calls) ===
+       JSON.stringify(originalEditRequest.find(message => message.tool_calls)?.tool_calls));
   await page.goto(manualForkURL);
   await page.getByRole('button', { name: 'Edit messages', exact: true }).click();
   await page.locator('#batch-editor[open]').waitFor();

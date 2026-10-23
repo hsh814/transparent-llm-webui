@@ -21,22 +21,39 @@ def preview_stream(model, messages, params, *, tools=None):
     if isinstance(source, list):
         source = "\n".join(part["text"] for part in source if part["type"] == "text")
     completed = sum(message["role"] == "tool" for message in messages[user_index + 1:])
-    required = 2 if "[multi-search]" in source or "[two-round-search]" in source else 1
-    if tools and "[no-search]" not in source and completed < required:
-        indexes = range(1, 3) if "[multi-search]" in source else [completed + 1]
+    budget_search = "[budget-search]" in source
+    correcting = "[invalid-search]" in source
+    required = 2 if correcting or "[multi-search]" in source or "[two-round-search]" in source else 1
+    if tools and "[no-search]" not in source and (budget_search or completed < required):
+        indexes = range(completed + 1, completed + 4) if budget_search else range(1, 3) if "[multi-search]" in source else [completed + 1]
         calls = []
         for index in indexes:
             query = f"paper table figure evidence {index}"
             if "[search-fail]" in source:
                 query += " [search-fail]"
+            max_results = (10 if completed == 0 else 5) if correcting else 2
             calls.append({"id": f"search-{index}", "type": "function", "function": {
-                "name": "web_search", "arguments": json.dumps({"query": query, "max_results": 2}),
+                "name": "web_search", "arguments": json.dumps({"query": query, "max_results": max_results}),
             }})
         time.sleep(0.4)
         yield {"type": "reasoning", "text": "Choosing a focused search query."}
         yield {"type": "content", "text": "I will check the sources."}
         yield {"type": "done", "finish_reason": "tool_calls", "tool_calls": calls,
                "usage": {"prompt_tokens": 8, "completion_tokens": 4, "total_tokens": 12}}
+        return
+    if budget_search and not tools:
+        time.sleep(0.4)
+        saved_results = any(
+            json.loads(message["content"]).get("results")
+            for message in messages[user_index + 1:] if message["role"] == "tool"
+        )
+        answer = (
+            "From the saved search evidence, Table 1 reports 42 samples and Figure 1 compares two methods. "
+            "I cannot establish more detail from these snippets alone."
+            if saved_results else "There is no saved search evidence, so I cannot establish an answer."
+        )
+        yield {"type": "content", "text": "No further tools are offered. " + answer}
+        yield {"type": "done", "usage": {"prompt_tokens": 12, "completion_tokens": 28, "total_tokens": 40}}
         return
     if "[variants]" in source:
         version = _response_versions.get(source, 0) + 1
@@ -66,6 +83,8 @@ def preview_stream(model, messages, params, *, tools=None):
 
 
 def preview_search(query, max_results=5):
+    if type(max_results) is not int or not 1 <= max_results <= 5:
+        raise AssertionError("An invalid search must not reach the provider.")
     time.sleep(0.4)
     if "[search-fail]" in query:
         raise RuntimeError("Simulated search failure")

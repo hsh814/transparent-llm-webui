@@ -171,7 +171,7 @@ def retry_generation(request: Request, session_id: int, web_search: bool = Form(
 
 
 @router.get("/sessions/{session_id}/edit", response_class=HTMLResponse)
-def edit_conversation(request: Request, session_id: int, focus: int | None = None):
+def edit_conversation(request: Request, session_id: int, focus: int | None = None, focus_tool: str = ""):
     _session(session_id)
     try:
         snapshot = db.edit_snapshot(session_id)
@@ -179,7 +179,7 @@ def edit_conversation(request: Request, session_id: int, focus: int | None = Non
         raise HTTPException(409, str(exc)) from exc
     return templating.templates.TemplateResponse(request, "_batch_editor.html", {
         "snapshot": snapshot, "session": snapshot["session"],
-        "folder": snapshot["folder"], "focus_message": focus,
+        "folder": snapshot["folder"], "focus_message": focus, "focus_tool": focus_tool,
         "editor_rows": sorted(
             [dict(message, editor_kind="message") for message in snapshot["messages"]]
             + [dict(group, editor_kind="tool") for group in snapshot["tool_groups"]],
@@ -351,7 +351,7 @@ def show_prompt(request: Request, session_id: int, message_id: int):
     if job is None and message["role"] == "user":
         raise HTTPException(404, "The original request was not stored for this message.")
     note = (
-        "Actual original response request, not the edited fork context. The saved response text is "
+        "Actual original response request, not the edited fork context. The saved response text or Thinking is "
         + ("manually edited, not a new model output." if historical["kind"] == "manual" else "carried from the earlier context.")
         if historical and job else
         "The actual original response request was not recorded; no replacement request has been invented."
@@ -402,7 +402,7 @@ def show_event_prompt(
     return templating.templates.TemplateResponse(request, "_prompt_viewer.html", {
         "session": session, "message": None, "messages": job["messages"],
         "messages_json": json.dumps(job["messages"], ensure_ascii=False, indent=2),
-        "sys_note": "Exact saved model request for this assistant tool-call round.",
+        "sys_note": "Exact saved model request for this assistant tool-call round. Thinking produced by this round is its output, not part of this round's input. Editing that output preserves this historical request; retained Thinking can be included in later requests.",
         "recorded": True, "request_params": job["params"], "job": job,
         "attachments": [], "request_tools": job.get("tools", []),
         "request_snapshot": job.get("request"),

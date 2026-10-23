@@ -23,10 +23,19 @@
   <p>Model: <code>{{ active_job.model if active_job else message.model }}</code></p>
   {% with attachments=attachments | default([]) %}{% include "_attachments.html" %}{% endwith %}
   <p>Text and image parts are shown below in order. Images require a vision-capable model; PDF pages include both rendered images and extracted text. Model accuracy is not guaranteed. Full image base64 is available in the exact JSON details.</p>
+  <p class="muted">Assistant Thinking is shown separately when the <code>reasoning</code> field is present. Saved output Thinking is not proof it appeared in an older request. The server and model template decide whether to use transmitted Thinking.</p>
   {% for m in messages %}
   <section class="prompt-message">
     <h2>{{ m.role }}</h2>
     {% if m.tool_call_id %}<p>Tool call ID: <code>{{ m.tool_call_id }}</code>{% if m.name %} · <code>{{ m.name }}</code>{% endif %}</p>{% endif %}
+    {% if m.role == 'assistant' %}
+    {% if 'reasoning' in m %}
+    <h3>Thinking included in this request</h3>
+    {% if m.reasoning %}<pre class="prompt-reasoning">{{ m.reasoning }}</pre>{% else %}<p class="prompt-reasoning-empty">The Thinking field is present but empty.</p>{% endif %}
+    {% else %}
+    <p class="prompt-reasoning-absent">{{ 'No Thinking included for this assistant in this saved request — no reasoning field.' if recorded else 'No Thinking field in this reconstruction; actual historical transmission is unknown.' }}</p>
+    {% endif %}
+    {% endif %}
     {% if m.content is string %}
     <pre>{{ m.content }}</pre>
     {% elif m.content %}
@@ -57,7 +66,12 @@
   {% if recorded %}
   <section class="prompt-tools">
     <h2>Exact tools schema</h2>
-    <p>{{ 'The model was permitted to request these tools on this round.' if request_tools else 'No tools were offered on this round.' }}</p>
+    <p>{{ 'These tools were offered to the model on this round.' if request_tools else 'No tools were offered on this round.' }}</p>
+    {% if request_snapshot and request_snapshot.search_budget %}
+    <p class="prompt-search-budget" data-budget-remaining="{{ request_snapshot.search_budget.remaining }}" data-budget-limit="{{ request_snapshot.search_budget.limit }}">App search budget at request: {{ request_snapshot.search_budget.remaining }} of {{ request_snapshot.search_budget.limit }} calls remaining.{% if request_snapshot.search_final_answer %} Final-answer mode: no tools are offered; the model must answer from saved evidence.{% elif request_snapshot.search_budget.remaining == 0 %} The budget is allocated to recorded calls; no additional calls are available. Pending or failed calls still need resolution before the final-answer request.{% endif %} Fresh-search permission is separate from this app budget.</p>
+    <pre id="prompt-search-budget">{{ request_snapshot.search_budget | tojson(indent=2) }}</pre>
+    {% endif %}
+    {% if request_snapshot and request_snapshot.search_permission is defined %}<p class="prompt-search-permission">Search permission: {{ 'enabled' if request_snapshot.search_permission else 'disabled' }}. Permission is separate from the app budget and tools offered on this round.</p>{% endif %}
     <pre id="prompt-tools">{{ request_tools | tojson(indent=2) }}</pre>
   </section>
   {% if request_snapshot %}

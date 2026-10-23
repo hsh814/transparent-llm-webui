@@ -10,7 +10,7 @@ import httpx
 
 import db
 import ollama
-from tool_events import MAX_TOOL_CALLS, pending_calls, total_usage
+from tool_events import MAX_TOOL_CALLS, budgeted_call_ids, pending_calls, total_usage
 
 logger = logging.getLogger(__name__)
 _lock = threading.Lock()
@@ -79,6 +79,10 @@ def _call_arguments(call: dict) -> tuple[str, dict]:
     return name, arguments
 
 
+class _InvalidSearchArguments(ollama.ToolCallError):
+    """A complete call whose arguments the model can correct."""
+
+
 def _search_arguments(job: dict, call: dict) -> tuple[str, int]:
     name, arguments = _call_arguments(call)
     if any(event.get("origin") == "legacy" and any(
@@ -90,46 +94,64 @@ def _search_arguments(job: dict, call: dict) -> tuple[str, int]:
         )
     if name != "web_search":
         raise ollama.ToolCallError("The model requested an unsupported tool. That tool was not executed.")
-    if not any(tool.get("type") == "function" and tool.get("function", {}).get("name") == name
-               for tool in job.get("tools", [])):
-        raise ollama.ToolCallError(
-            "Web search is not allowed for this response. Enable Allow web search and retry, "
-            "or fork before the tool call."
-        )
     query = arguments.get("query")
     max_results = arguments.get("max_results", 5)
-    if (set(arguments) - {"query", "max_results"} or not isinstance(query, str)
-            or not query.strip() or isinstance(max_results, bool)
-            or not isinstance(max_results, int) or not 1 <= max_results <= 5):
-        raise ollama.ToolCallError(
-            "The model requested an invalid web search. A nonempty query and 1–5 results are required."
+    problems = []
+    if extra := set(arguments) - {"query", "max_results"}:
+        problems.append("Unsupported arguments: " + ", ".join(sorted(extra)) + ". Only query and max_results are allowed.")
+    if not isinstance(query, str) or not query.strip():
+        problems.append("query must be a nonempty string.")
+    if isinstance(max_results, bool) or not isinstance(max_results, int) or not 1 <= max_results <= 5:
+        problems.append(
+            "max_results must be an integer from 1 to 5 (maximum 5; default 5 if omitted); "
+            f"received {json.dumps(max_results, ensure_ascii=False)}."
+        )
+    if problems:
+        raise _InvalidSearchArguments(
+            "Web search was not executed. " + " ".join(problems)
+            + " Correct the arguments and call web_search again with a new tool call ID."
         )
     return query, max_results
 
 
 def _execute_tools(job: dict) -> dict | None:
     calls = pending_calls(job["trace"])
-    retained_results = {
-        event["message"]["tool_call_id"] for event in job["trace"]
-        if event["kind"] == "tool" and event.get("retained") and event.get("message") is not None
-        and event["status"] in ("completed", "failed")
-    }
-    call_count = sum(
-        call["id"] not in retained_results
-        for event in job["trace"] if event["kind"] == "assistant"
-        for call in event["message"].get("tool_calls", [])
-    )
-    if call_count > MAX_TOOL_CALLS:
-        raise ollama.ToolCallError(
-            "The model exceeded the limit of eight tool calls for one response. "
-            "Fork before the tool call or regenerate the response."
-        )
+    eligible = set(budgeted_call_ids(job["trace"])[:MAX_TOOL_CALLS])
+    permitted = job.get("search_permission", bool(job.get("tools")))
     validated = []
-    # Validate the whole pending batch before allowing any external operation.
+    # Check the whole batch's permission/protocol before any external operation.
+    # Argument rejections are paired tool replies, not executable searches.
     for call in calls:
-        query, max_results = _search_arguments(job, call)
-        validated.append((call, query, max_results))
-    for call, query, max_results in validated:
+        arguments = None
+        rejection = None
+        error_type = "invalid_arguments"
+        try:
+            arguments = _search_arguments(job, call)
+        except _InvalidSearchArguments as exc:
+            rejection = str(exc)
+        if call["id"] not in eligible:
+            rejection = (
+                f"Web search was not executed: the budget of {MAX_TOOL_CALLS} calls for this response "
+                "is exhausted. Do not retry this call. Answer using the evidence already gathered "
+                "and state any uncertainty; no further searches are available."
+            )
+            error_type = "search_budget_exhausted"
+        elif not permitted:
+            raise ollama.ToolCallError(
+                "Web search is not allowed for this response. Enable Allow web search and retry, "
+                "or fork before the tool call."
+            )
+        validated.append((call, arguments, rejection, error_type))
+    for call, arguments, rejection, error_type in validated:
+        if rejection is not None:
+            if not db.reject_tool(job, call["id"], rejection, error_type=error_type):
+                return None
+            job = _reload(job)
+            if job is None:
+                return None
+            continue
+        assert arguments is not None  # Preflight produced either validated arguments or a rejection.
+        query, max_results = arguments
         if not db.start_tool(job, call["id"]):
             return None
         job = _reload(job)
@@ -163,9 +185,11 @@ def _generate(job: dict) -> None:
             job = _execute_tools(job)
             if job is None:
                 return
-            # CAS immediately before each model call, including resumed tool rounds.
-            if not db.update_generation(job, content, reasoning):
+            # Save the exact offered schema, budget, and final-answer instruction.
+            prepared = db.prepare_model_request(job)
+            if prepared is None:
                 return
+            job = prepared
             stream = ollama.chat_stream(
                 job["model"], job["messages"], job["params"], tools=job.get("tools", [])
             )
@@ -197,6 +221,7 @@ def _generate(job: dict) -> None:
             if calls or finish_reason == "tool_calls":
                 if not calls or finish_reason != "tool_calls":
                     raise ollama.ToolCallError("The model returned incomplete tool calls. Retry the response.")
+                final_answer_round = job.get("search_budget", {}).get("remaining") == 0
                 previous_ids = {
                     call["id"] for event in job["trace"] if event["kind"] == "assistant"
                     for call in event["message"].get("tool_calls", [])
@@ -213,6 +238,15 @@ def _generate(job: dict) -> None:
                 job = _reload(job)
                 if job is None:
                     return
+                if final_answer_round:
+                    resolved = _execute_tools(job)
+                    if resolved is None:
+                        return
+                    job = resolved
+                    raise ollama.ToolCallError(
+                        "The model requested tools after web search was disabled for the final answer. "
+                        "No additional searches were executed. Retry to request the final answer again."
+                    )
                 continue
             if not (content or reasoning):
                 raise RuntimeError("Upstream closed without a complete response")

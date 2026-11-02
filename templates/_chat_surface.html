@@ -36,6 +36,8 @@
 </div>
 <div class="composer-wrap">
   <button class="btn-mini jump-latest" type="button" hidden>↓ Latest message</button>
+  <details class="composer-toggle" open>
+    <summary><span class="composer-show">Show input</span><span class="composer-hide">Hide input</span></summary>
   <form class="composer" data-session-id="{{ session.id }}" data-mode="{{ folder.type }}"{% if editor_web_search is defined and editor_web_search is not none %} data-editor-web-search="{{ 'true' if editor_web_search else 'false' }}"{% endif %}
         hx-post="/sessions/{{ session.id }}/{{ 'memo' if folder.type == 'memo' else 'send' }}"
         hx-target="#message-list" hx-swap="beforeend" hx-disabled-elt="find button[type=submit]" hx-sync="this:drop"
@@ -65,6 +67,7 @@
     </div>
   </form>
   <div class="composer-hint">{% if folder.type == 'memo' %}Only saved here. Never sent to a model.{% elif folder.type == 'translation' %}Translated in chunks of {{ folder.chunk_limit or 1000 }} characters. Each chunk uses the visible system prompt.{% else %}Enter to send · Shift + Enter for a new line{% endif %}<span>Drafts saved in this browser</span></div>
+  </details>
 </div>
 {% else %}
 <div class="welcome-bar"><span class="eyebrow">Your space to think</span><span class="muted">Transparent Chat</span></div>

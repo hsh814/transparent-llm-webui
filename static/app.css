@@ -148,6 +148,9 @@ input.title-input:hover, input.title-input:focus { border-bottom-color: var(--bo
 .error-text { font-size: 12px; color: var(--danger); }
 .generation-error { border-bottom: 1px solid var(--border); }
 .composer-wrap { position: relative; padding: 12px max(28px, calc((100% - 820px)/2)) 18px; flex-shrink: 0; }
+.composer-toggle > summary { width: fit-content; min-height: 28px; margin-left: auto; padding: 4px 0; color: var(--muted); font-size: 11px; }
+.composer-toggle[open] > summary { margin-bottom: 6px; }
+.composer-toggle[open] .composer-show, .composer-toggle:not([open]) .composer-hide { display: none; }
 .composer { --composer-control-height: 34px; }
 .composer textarea { display: block; width: 100%; min-height: calc(1.6em + 18px); max-height: min(240px, 30vh); padding: 8px 12px; border: 1px solid #d7ded5; border-radius: 10px; outline: 0; resize: none; background: var(--surface); font-size: 14px; line-height: 1.6; box-shadow: 0 4px 20px #25332d05; }
 .composer textarea:focus { border-color: #89a48d; box-shadow: 0 0 0 3px #37664f09; }
@@ -250,6 +253,7 @@ input.title-input:hover, input.title-input:focus { border-bottom-color: var(--bo
   .message-actions { gap: 6px; }
   .message-actions .btn-mini, .retry-generation { min-height: 36px; }
   .composer-wrap { padding: 8px 12px max(12px, env(safe-area-inset-bottom)); }
+  .composer-toggle > summary { min-height: 36px; padding: 8px 0; }
   .composer textarea { font-size: 16px; }
   .composer-hint { font-size: 9px; justify-content: center; }
   .attachment-metadata { grid-template-columns: minmax(0, 1fr); }

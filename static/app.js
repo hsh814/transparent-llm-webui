@@ -343,6 +343,7 @@
     initializeEditor();
     if (form && !readyForms.has(form)) {
       readyForms.add(form);
+      form.closest('.composer-toggle').open = storage('getItem', 'transparent:composer-collapsed') !== 'true';
       const textarea = $('textarea', form);
       textarea.value = storage('getItem', draftKey(form)) || '';
       resize(textarea);
@@ -441,6 +442,12 @@
       renderAttachments(form);
     }
   });
+  document.addEventListener('toggle', event => {
+    if (!event.target.matches('.composer-toggle')) return;
+    storage('setItem', 'transparent:composer-collapsed', String(!event.target.open));
+    if (event.target.open) resize($('textarea', event.target));
+    syncMessages();
+  }, true);
   document.addEventListener('keydown', event => {
     if ($('#batch-editor[open]')) {
       if ((event.metaKey || event.ctrlKey) && ['k', 'enter'].includes(event.key.toLowerCase())) event.preventDefault();

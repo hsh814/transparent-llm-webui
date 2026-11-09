@@ -3,32 +3,30 @@
 Serves the htmx UI and a small JSON-free HTML/SSE API. Single user, no auth.
 """
 
-import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv()  # must run before local imports read env (ollama.py)
+load_dotenv()  # must run before local imports read provider configuration
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 import db
+import providers
 import templating
 from routers import chat, folders, sessions
 
-if not os.environ.get("OLLAMA_API_KEY"):
-    raise RuntimeError(
-        "OLLAMA_API_KEY is not set. Add it to .env (or export it) before starting."
-    )
+providers.default_provider()  # fail fast on invalid configuration or no active providers
 
 BASE_DIR = Path(__file__).parent
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    providers.default_provider()
     db.init_db()
     db.recover_generations()
     yield

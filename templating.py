@@ -9,6 +9,7 @@ from fastapi.templating import Jinja2Templates
 
 import db
 import ollama
+import providers
 
 templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
 
@@ -74,17 +75,35 @@ def _sort_models(models: list[str], usage: dict[str, int]) -> list[str]:
 templates.env.filters["sort_models"] = _sort_models
 
 
-def chat_context(session: dict) -> dict:
-    """Live model list + context cap for a session, with safe fallbacks."""
+def chat_context(session: dict, provider: str | None = None) -> dict:
+    """Provider-scoped catalog; browsing a provider never changes saved settings."""
+    available = providers.list_providers()
+    selected = provider or session["provider"]
+    if len(available) == 1 and not any(p.id == selected for p in available):
+        selected = available[0].id
+    current = selected == session["provider"]
+    model = session["model"] if current else ""
+    error = None
     try:
-        models = ollama.list_models()
+        providers.get_provider(selected)
+        models = ollama.list_models(selected)
     except Exception:
-        models = [session["model"]]
-    try:
-        ctx_cap = ollama.model_context_length(session["model"])
-    except Exception:
-        ctx_cap = None
-    return {"models": list(dict.fromkeys([session["model"], *models])), "ctx_cap": ctx_cap, "usage": db.model_usage()}
+        models = []
+        error = "Model list unavailable. Check this provider's configuration, then refresh."
+    ctx_cap = None
+    if model:
+        try:
+            ctx_cap = ollama.model_context_length(model, selected)
+        except Exception:
+            pass
+    return {
+        "models": list(dict.fromkeys(([model] if model else []) + models)),
+        "ctx_cap": ctx_cap, "usage": db.model_usage(selected),
+        "providers": available, "selected_provider": selected,
+        "selected_model": model, "pending_provider": not current,
+        "provider_missing": not any(p.id == selected for p in available),
+        "catalog_error": error,
+    }
 
 
 def message_controls(session: dict, message: dict, *, rows=None, jobs=None) -> dict:

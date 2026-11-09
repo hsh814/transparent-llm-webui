@@ -1,23 +1,17 @@
-"""Typed client wrapper over Ollama Cloud.
-
-Two base URLs:
-- native API:  https://ollama.com/api   (/api/tags, /api/show)
-- OpenAI API:  https://ollama.com/v1    (/v1/models, /v1/chat/completions)
-
-Auth: `Authorization: Bearer $OLLAMA_API_KEY`.
-"""
+"""Provider-routed OpenAI-compatible chat and Ollama-native metadata/tools."""
 
 import json
 import os
 import time
 from functools import wraps
+from hashlib import sha256
+from inspect import signature
 from typing import Iterator
 from urllib.parse import urlsplit
 
 import httpx
 
-API_BASE = os.environ.get("OLLAMA_API_BASE_URL", "https://ollama.com")
-OPENAI_BASE = os.environ.get("OLLAMA_OPENAI_BASE_URL", "https://ollama.com/v1")
+import providers
 
 TIMEOUT = httpx.Timeout(120.0, connect=20.0)
 METADATA_TIMEOUT = httpx.Timeout(5.0, connect=3.0)
@@ -28,16 +22,23 @@ _CACHE: dict[tuple, tuple[float, object]] = {}
 
 def _metadata_cache(function):
     """Cache successful metadata for five minutes and outages for 30 seconds."""
+    parameters = signature(function)
     @wraps(function)
-    def cached(*args):
-        key = (function.__name__, args)
+    def cached(*args, **kwargs):
+        bound = parameters.bind(*args, **kwargs)
+        bound.apply_defaults()
+        provider = bound.arguments["provider"]
+        configured = providers.get_provider(provider)
+        credential = sha256(os.environ[configured.api_key_env].encode()).digest()
+        arguments = tuple(value for name, value in bound.arguments.items() if name != "provider")
+        key = (configured, credential, function.__name__, arguments)
         entry = _CACHE.get(key)
         if entry and entry[0] > time.monotonic():
             if isinstance(entry[1], Exception):
                 raise entry[1]
             return entry[1]
         try:
-            value = function(*args)
+            value = function(*bound.args, **bound.kwargs)
         except Exception as exc:
             _CACHE[key] = (time.monotonic() + 30, exc)
             raise
@@ -46,23 +47,37 @@ def _metadata_cache(function):
     return cached
 
 
-def clear_cache() -> None:
-    """Drop all cached values; next call re-fetches from Ollama."""
-    _CACHE.clear()
+def clear_cache(provider: str | None = None) -> None:
+    """Drop metadata for one provider, or all providers when omitted."""
+    if provider is None:
+        _CACHE.clear()
+    else:
+        for key in list(_CACHE):
+            if key[0].id == provider:
+                _CACHE.pop(key, None)
 
 
-def _headers() -> dict:
-    return {"Authorization": f"Bearer {os.environ.get('OLLAMA_API_KEY', '')}"}
+def _headers(provider: str = "ollama") -> dict:
+    configured = providers.get_provider(provider)
+    return {"Authorization": f"Bearer {os.environ[configured.api_key_env]}"}
 
 
-def _client() -> httpx.Client:
-    return httpx.Client(base_url=OPENAI_BASE, headers=_headers(), timeout=TIMEOUT)
+def _client(provider: str = "ollama") -> httpx.Client:
+    configured = providers.get_provider(provider)
+    return httpx.Client(base_url=configured.base_url, headers=_headers(provider), timeout=TIMEOUT)
+
+
+def _native_client(provider: str, timeout: httpx.Timeout) -> httpx.Client:
+    configured = providers.get_provider(provider)
+    if configured.kind != "ollama":
+        raise ToolCallError("Native web tools are not supported by the selected provider.")
+    return httpx.Client(base_url=configured.native_base_url, headers=_headers(provider), timeout=timeout)
 
 
 @_metadata_cache
-def list_models() -> list[str]:
-    """GET /v1/models -> [model ids]."""
-    with _client() as client:
+def list_models(provider: str = "ollama") -> list[str]:
+    """GET the selected provider's model catalogue."""
+    with _client(provider) as client:
         resp = client.get("/models", timeout=METADATA_TIMEOUT)
         resp.raise_for_status()
         data = resp.json()
@@ -71,9 +86,11 @@ def list_models() -> list[str]:
 
 
 @_metadata_cache
-def model_context_length(model: str) -> int | None:
-    """POST /api/show -> context length from model_info, or None."""
-    with httpx.Client(base_url=API_BASE, headers=_headers(), timeout=METADATA_TIMEOUT) as client:
+def model_context_length(model: str, provider: str = "ollama") -> int | None:
+    """Read native Ollama context metadata; other providers have no native metadata."""
+    if providers.get_provider(provider).kind != "ollama":
+        return None
+    with _native_client(provider, METADATA_TIMEOUT) as client:
         resp = client.post("/api/show", json={"model": model})
         resp.raise_for_status()
         data = resp.json()
@@ -86,9 +103,9 @@ def model_context_length(model: str) -> int | None:
     return ctx
 
 
-def web_search(query: str, max_results: int = 5) -> list[dict]:
+def web_search(query: str, max_results: int = 5, *, provider: str = "ollama") -> list[dict]:
     """Fetch validated source snippets once; malformed results fail visibly."""
-    with httpx.Client(base_url=API_BASE, headers=_headers(), timeout=SEARCH_TIMEOUT) as client:
+    with _native_client(provider, SEARCH_TIMEOUT) as client:
         resp = client.post("/api/web_search", json={"query": query, "max_results": max_results})
         resp.raise_for_status()
         data = resp.json()
@@ -111,9 +128,9 @@ def web_search(query: str, max_results: int = 5) -> list[dict]:
     return results
 
 
-def web_fetch(url: str) -> dict:
+def web_fetch(url: str, *, provider: str = "ollama") -> dict:
     """Retrieve provider-extracted page text; never contact the target URL locally."""
-    with httpx.Client(base_url=API_BASE, headers=_headers(), timeout=SEARCH_TIMEOUT) as client:
+    with _native_client(provider, SEARCH_TIMEOUT) as client:
         resp = client.post("/api/web_fetch", json={"url": url})
         resp.raise_for_status()
         data = resp.json()
@@ -146,7 +163,8 @@ def _build_payload(
 
 
 def chat_stream(
-    model: str, messages: list[dict], params: dict, *, tools: list[dict] | None = None
+    model: str, messages: list[dict], params: dict, *, tools: list[dict] | None = None,
+    provider: str = "ollama",
 ) -> Iterator[dict]:
     """Stream text/reasoning and return complete, validated calls on the done chunk."""
     payload = _build_payload(model, messages, params, tools=tools)
@@ -155,7 +173,7 @@ def chat_stream(
     finished = False
     finish_reason = None
     calls: dict[int, dict] = {}
-    with _client() as client:
+    with _client(provider) as client:
         with client.stream("POST", "/chat/completions", json=payload) as resp:
             resp.raise_for_status()
             for line in resp.iter_lines():
@@ -168,11 +186,11 @@ def chat_stream(
                 try:
                     chunk = json.loads(data)
                 except json.JSONDecodeError as exc:
-                    raise RuntimeError("Invalid response from Ollama") from exc
+                    raise RuntimeError("Invalid response from provider") from exc
                 if not isinstance(chunk, dict):
-                    raise RuntimeError("Invalid response from Ollama")
+                    raise RuntimeError("Invalid response from provider")
                 if chunk.get("error"):
-                    raise RuntimeError("Ollama reported a generation error")
+                    raise RuntimeError("Provider reported a generation error")
                 if chunk.get("usage"):
                     usage = chunk.get("usage")
                 choices = chunk.get("choices") or []
@@ -184,31 +202,31 @@ def chat_stream(
                 fragments = delta.get("tool_calls")
                 if fragments is not None:
                     if not isinstance(fragments, list) or finish_reason is not None:
-                        raise ToolCallError("Ollama returned malformed tool calls. Retry the response.")
+                        raise ToolCallError("Provider returned malformed tool calls. Retry the response.")
                     for fragment in fragments:
                         if not isinstance(fragment, dict):
-                            raise ToolCallError("Ollama returned malformed tool calls. Retry the response.")
+                            raise ToolCallError("Provider returned malformed tool calls. Retry the response.")
                         index = fragment.get("index")
                         if isinstance(index, bool) or not isinstance(index, int) or index < 0:
-                            raise ToolCallError("Ollama returned a tool call without a valid index. Retry the response.")
+                            raise ToolCallError("Provider returned a tool call without a valid index. Retry the response.")
                         call = calls.setdefault(index, {
                             "id": "", "type": "function", "function": {"name": "", "arguments": ""}
                         })
                         if fragment.get("type") not in (None, "function"):
-                            raise ToolCallError("Ollama returned an unsupported tool call type.")
+                            raise ToolCallError("Provider returned an unsupported tool call type.")
                         call_id = fragment.get("id")
                         if call_id is not None:
                             if not isinstance(call_id, str):
-                                raise ToolCallError("Ollama returned malformed tool calls. Retry the response.")
+                                raise ToolCallError("Provider returned malformed tool calls. Retry the response.")
                             call["id"] += call_id
                         function = fragment.get("function") or {}
                         if not isinstance(function, dict):
-                            raise ToolCallError("Ollama returned malformed tool calls. Retry the response.")
+                            raise ToolCallError("Provider returned malformed tool calls. Retry the response.")
                         for key in ("name", "arguments"):
                             value = function.get(key)
                             if value is not None:
                                 if not isinstance(value, str):
-                                    raise ToolCallError("Ollama returned malformed tool calls. Retry the response.")
+                                    raise ToolCallError("Provider returned malformed tool calls. Retry the response.")
                                 call["function"][key] += value
                 if finish is not None:
                     finish_reason = finish
@@ -218,32 +236,34 @@ def chat_stream(
                 if delta.get("content"):
                     yield {"type": "content", "text": delta["content"]}
             if not finished:
-                raise RuntimeError("Ollama disconnected before completing the response")
+                raise RuntimeError("Provider disconnected before completing the response")
             tool_calls = [calls[index] for index in sorted(calls)]
             if tool_calls or finish_reason == "tool_calls":
                 if (not tool_calls or finish_reason != "tool_calls"
                         or sorted(calls) != list(range(len(calls)))):
-                    raise ToolCallError("Ollama returned incomplete tool calls. Retry the response.")
+                    raise ToolCallError("Provider returned incomplete tool calls. Retry the response.")
                 ids = set()
                 for call in tool_calls:
                     if not call["id"].strip() or not call["function"]["name"].strip() or call["id"] in ids:
-                        raise ToolCallError("Ollama returned incomplete or duplicate tool call IDs. Retry the response.")
+                        raise ToolCallError("Provider returned incomplete or duplicate tool call IDs. Retry the response.")
                     ids.add(call["id"])
                     try:
                         arguments = json.loads(call["function"]["arguments"])
                     except (ValueError, TypeError) as exc:
-                        raise ToolCallError("Ollama returned invalid tool arguments. Retry the response.") from exc
+                        raise ToolCallError("Provider returned invalid tool arguments. Retry the response.") from exc
                     if not isinstance(arguments, dict):
-                        raise ToolCallError("Ollama returned invalid tool arguments. Retry the response.")
+                        raise ToolCallError("Provider returned invalid tool arguments. Retry the response.")
             yield {"type": "done", "text": "", "usage": usage,
                    "tool_calls": tool_calls, "finish_reason": finish_reason}
 
 
-def chat_once(model: str, messages: list[dict], params: dict) -> tuple[str, str | None, dict | None]:
+def chat_once(
+    model: str, messages: list[dict], params: dict, *, provider: str = "ollama"
+) -> tuple[str, str | None, dict | None]:
     """Non-streaming chat; returns (content, reasoning_or_None, usage_or_None)."""
     payload = _build_payload(model, messages, params)
     payload["stream"] = False
-    with _client() as client:
+    with _client(provider) as client:
         resp = client.post("/chat/completions", json=payload)
         resp.raise_for_status()
         data = resp.json()

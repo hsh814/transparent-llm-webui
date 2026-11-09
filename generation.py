@@ -11,6 +11,7 @@ import httpx
 
 import db
 import ollama
+import providers
 from tool_events import MAX_TOOL_CALLS, budgeted_call_ids, pending_calls, total_usage
 
 logger = logging.getLogger(__name__)
@@ -24,14 +25,14 @@ def error_message(exc: Exception) -> str:
     if isinstance(exc, httpx.HTTPStatusError):
         status = exc.response.status_code
         if status in (401, 403):
-            return "Ollama rejected the API key. Check OLLAMA_API_KEY and retry."
+            return "The provider rejected the API key. Check its configured key and retry."
         if status == 429:
-            return "Ollama's rate limit was reached. Wait a moment, then retry."
-        return f"Ollama returned HTTP {status}. Check the selected model and settings, then retry."
+            return "The provider's rate limit was reached. Wait a moment, then retry."
+        return f"The provider returned HTTP {status}. Check the selected model and settings, then retry."
     if isinstance(exc, httpx.TimeoutException):
-        return "Ollama timed out. Your input is saved; retry when ready."
+        return "The provider timed out. Your input is saved; retry when ready."
     if isinstance(exc, httpx.RequestError):
-        return "Could not reach Ollama. Check your connection and retry."
+        return "Could not reach the provider. Check your connection and retry."
     return "The response could not be completed. Your input is saved; retry when ready."
 
 
@@ -185,10 +186,10 @@ def _execute_tools(job: dict) -> dict | None:
         try:
             if name == "web_search":
                 result = {**arguments, "results": ollama.web_search(
-                    arguments["query"], max_results=arguments["max_results"],
+                    arguments["query"], max_results=arguments["max_results"], provider=job["provider"],
                 )}
             else:
-                result = {**arguments, **ollama.web_fetch(arguments["url"])}
+                result = {**arguments, **ollama.web_fetch(arguments["url"], provider=job["provider"])}
         except Exception as exc:
             if name == "web_fetch" and isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 404:
                 status = "unavailable"
@@ -196,7 +197,7 @@ def _execute_tools(job: dict) -> dict | None:
                     "url": arguments["url"], "error_type": "http_not_found",
                     "status_code": 404, "executed": True,
                     "error": (
-                        "Ollama returned HTTP 404 (Not Found) while fetching this URL; "
+                        "The provider returned HTTP 404 (Not Found) while fetching this URL; "
                         "no page content was retrieved. Use the evidence already gathered or choose "
                         "another relevant URL. Do not repeat this unchanged URL. "
                         "If the available evidence is insufficient, state the uncertainty."
@@ -223,6 +224,13 @@ def _generate(job: dict) -> None:
     content = ""
     reasoning = ""
     try:
+        try:
+            providers.get_provider(job["provider"])
+        except ValueError as exc:
+            # Registry errors are deliberately safe; never expose arbitrary upstream bodies.
+            raise ollama.ToolCallError(str(exc)) from exc
+        if not job["model"].strip():
+            raise ollama.ToolCallError("Select a model before requesting a response.")
         while True:
             job = _execute_tools(job)
             if job is None:
@@ -233,7 +241,8 @@ def _generate(job: dict) -> None:
                 return
             job = prepared
             stream = ollama.chat_stream(
-                job["model"], job["messages"], job["params"], tools=job.get("tools", [])
+                job["model"], job["messages"], job["params"],
+                tools=job.get("tools", []), provider=job["provider"],
             )
             finished = False
             usage = None

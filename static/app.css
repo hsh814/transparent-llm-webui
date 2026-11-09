@@ -83,8 +83,10 @@ input[type="range"] { accent-color: var(--accent); width: 100%; }
 .inline-form { margin: 0; }
 input.title-input { border-color: transparent; width: 100%; padding: 2px 0; border-radius: 4px; font-size: 18px; font-weight: 600; background: transparent; }
 input.title-input:hover, input.title-input:focus { border-bottom-color: var(--border); }
-.model-selector { display: flex; align-items: center; gap: 4px; }
-.model-selector select { max-width: 230px; font-size: 12px; background: var(--bg); }
+.model-selector { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 0; }
+.model-choices { display: flex; align-items: center; gap: 4px; min-width: 0; max-width: 100%; }
+.model-selector select { max-width: 230px; min-width: 0; font-size: 12px; background: var(--bg); }
+.model-selection-note { font-size: 11px; max-width: 420px; }
 .btn-refresh { border: 0; font-size: 20px; }
 .context-bar { display: flex; align-items: flex-start; gap: 14px; position: relative; padding: 11px 32px; border-bottom: 1px solid var(--border); background: #f7f8f5; flex-shrink: 0; }
 .system-prompt { flex: 1; min-width: 0; font-size: 11px; }
@@ -244,6 +246,7 @@ input.title-input:hover, input.title-input:focus { border-bottom-color: var(--bo
   input.title-input { font-size: 16px; }
   .chat-header > .btn-mini { font-size: 10px; }
   .model-selector { width: 100%; }
+  .model-choices { width: 100%; }
   .model-selector select { max-width: 100%; width: 100%; padding: 4px 8px; font-size: 12px; }
   .context-bar { padding: 10px 16px; gap: 10px; }
   .context-bar > .badge-usage { display: none; }

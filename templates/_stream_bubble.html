@@ -22,7 +22,7 @@
   {% endif %}
   {% if job.status not in ('completed', 'idle') %}
   <div class="message assistant generation-progress {{ 'streaming' if active else 'generation-error' }}">
-    <div class="message-meta"><span class="role-label">Assistant</span><span class="badge">{{ job.model }}</span><span class="generation-label">{{ 'Responding…' if job.status == 'running' else 'Queued' if job.status == 'queued' else 'Stopped' if job.status == 'cancelled' else 'Could not finish' }}</span><a class="btn-mini" target="_blank" rel="noopener" href="/sessions/{{ session.id }}/messages/{{ job.user_message_id }}/prompt">Prompt</a></div>
+    <div class="message-meta"><span class="role-label">Assistant</span><span class="badge">{{ job.provider }} / {{ job.model }}</span><span class="generation-label">{{ 'Responding…' if job.status == 'running' else 'Queued' if job.status == 'queued' else 'Stopped' if job.status == 'cancelled' else 'Could not finish' }}</span><a class="btn-mini" target="_blank" rel="noopener" href="/sessions/{{ session.id }}/messages/{{ job.user_message_id }}/prompt">Prompt</a></div>
     {% if active %}
     <details class="reasoning"{% if not job.reasoning %} hidden{% endif %}><summary>Thinking</summary><div class="reasoning-text" sse-swap="reasoning" hx-swap="innerHTML">{{ job.reasoning }}</div></details>
     <div class="content" sse-swap="content" hx-swap="innerHTML">{{ job.content }}</div>

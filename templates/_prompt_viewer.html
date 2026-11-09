@@ -20,6 +20,7 @@
   {% endif %}
   {% if sys_note %}<p>{{ sys_note }}</p>{% endif %}
   {% if message and message.provenance %}<p><a href="/sessions/{{ session.id }}/messages/{{ message.id }}/source">Inspect before-edit text and original provenance</a></p>{% endif %}
+  <p>Provider: <code>{{ active_job.provider if active_job else message.provider }}</code></p>
   <p>Model: <code>{{ active_job.model if active_job else message.model }}</code></p>
   {% with attachments=attachments | default([]) %}{% include "_attachments.html" %}{% endwith %}
   <p>Text and image parts are shown below in order. Images require a vision-capable model; PDF pages include both rendered images and extracted text. Model accuracy is not guaranteed. Full image base64 is available in the exact JSON details.</p>

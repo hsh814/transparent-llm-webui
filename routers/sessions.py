@@ -8,6 +8,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 import db
 import ollama
+import providers
 import templating
 
 router = APIRouter()
@@ -65,7 +66,8 @@ def delete_session(request: Request, session_id: int, active_session_id: int | N
 def update_model_params(
     request: Request,
     session_id: int,
-    model: str = Form(..., min_length=1, max_length=200),
+    model: str | None = Form(None, max_length=200),
+    provider: str | None = Form(None, max_length=80),
     reasoning_effort: str | None = Form(None, pattern="^(none|low|medium|high|max)$"),
     temperature: float | None = Form(None, ge=0, le=2),
     top_p: float | None = Form(None, ge=0, le=1),
@@ -78,8 +80,18 @@ def update_model_params(
     session = db.get_session(session_id)
     if session is None:
         return HTMLResponse("", status_code=404)
-    if not model.strip():
-        raise HTTPException(422, "Choose a model.")
+    selected_provider = provider or session["provider"]
+    selected_model = model if model is not None and model.strip() else session["model"]
+    if selected_provider != session["provider"] and not (model and model.strip()):
+        raise HTTPException(422, "Choose a model before saving a different provider.")
+    if selected_provider != session["provider"] or selected_model != session["model"]:
+        try:
+            providers.get_provider(selected_provider)
+            models = ollama.list_models(selected_provider)
+        except Exception as exc:
+            raise HTTPException(422, "Model list unavailable. Refresh this provider before changing models.") from exc
+        if selected_model not in models:
+            raise HTTPException(422, "Choose a model from this provider's model list.")
     if any(value is not None for value in (num_ctx, top_k, repeat_penalty)):
         raise HTTPException(422, "Context size, top K, and repeat penalty are not supported by this API endpoint.")
     params = {**db.DEFAULT_PARAMS, **json.loads(session["params_json"])}
@@ -96,15 +108,15 @@ def update_model_params(
         except ValueError as exc:
             raise HTTPException(422, "Seed must be a whole number or blank.") from exc
     db.update_session(
-        session_id, model=model, params_json=json.dumps(params),
+        session_id, model=selected_model, params_json=json.dumps(params),
+        **({"provider": selected_provider} if selected_provider != session["provider"] else {}),
         params_updated_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
     )
     session = db.get_session(session_id)
     ctx = templating.chat_context(session)
-    models, ctx_cap = ctx["models"], ctx["ctx_cap"]
+    ctx_cap = ctx["ctx_cap"]
     selector = templating.templates.env.get_template("_model_selector.html").render(
-        session=session, models=models, params=params, usage=db.model_usage(),
-        ctx_cap=ctx_cap,
+        session=session, ctx=ctx,
     )
     panel = templating.templates.env.get_template("_params_panel.html").render(
         session=session, params=params, ctx_cap=ctx_cap
@@ -116,18 +128,32 @@ def update_model_params(
     return HTMLResponse(selector + panel + templating.session_sidebar(request, session), headers={"HX-Trigger": "settingsSaved"})
 
 
+@router.get("/sessions/{session_id}/models", response_class=HTMLResponse)
+def provider_models(request: Request, session_id: int, provider: str):
+    session = db.get_session(session_id)
+    if session is None:
+        raise HTTPException(404, "This chat no longer exists.")
+    try:
+        providers.get_provider(provider)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return templating.templates.TemplateResponse(request, "_model_selector.html", {
+        "session": session, "ctx": templating.chat_context(session, provider),
+    })
+
+
 @router.post("/sessions/{session_id}/model/refresh", response_class=HTMLResponse)
-def refresh_model_cache(request: Request, session_id: int):
+def refresh_model_cache(request: Request, session_id: int, provider: str | None = Form(None)):
     session = db.get_session(session_id)
     if session is None:
         return HTMLResponse("", status_code=404)
-    ollama.clear_cache()
-    ctx = templating.chat_context(session)
-    models, ctx_cap = ctx["models"], ctx["ctx_cap"]
+    selected = provider or session["provider"]
+    ollama.clear_cache(selected)
+    ctx = templating.chat_context(session, selected)
+    ctx_cap = ctx["ctx_cap"] if selected == session["provider"] else templating.chat_context(session)["ctx_cap"]
     params = json.loads(session["params_json"] or "{}")
     selector = templating.templates.env.get_template("_model_selector.html").render(
-        session=session, models=models, params=params, usage=db.model_usage(),
-        ctx_cap=ctx_cap,
+        session=session, ctx=ctx,
     )
     panel = templating.templates.env.get_template("_params_panel.html").render(
         session=session, params=params, ctx_cap=ctx_cap

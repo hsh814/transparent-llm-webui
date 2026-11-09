@@ -1,7 +1,21 @@
-<form class="model-selector" id="model-selector" hx-post="/sessions/{{ session.id }}/model" hx-target="#model-selector" hx-swap="outerHTML" hx-trigger="change">
-  <label class="sr-only" for="model-choice">Model for the next message</label>
-  <select id="model-choice" name="model">
-    {% for m in models | sort_models(usage) %}<option value="{{ m }}" {{ 'selected' if m == session.model else '' }}>{{ m }}</option>{% endfor %}
-  </select>
-  <button type="button" class="btn-refresh" hx-post="/sessions/{{ session.id }}/model/refresh" hx-target="#model-selector" hx-swap="outerHTML" title="Refresh model list" aria-label="Refresh model list">↻</button>
-</form>
+<div class="model-selector" id="model-selector" hx-target="#model-selector" hx-swap="outerHTML" hx-sync="this:replace">
+  <div class="model-choices">
+    {% if ctx.providers | length > 1 or ctx.provider_missing %}
+    <label class="sr-only" for="provider-choice">Provider for the next message</label>
+    <select id="provider-choice" name="provider" hx-get="/sessions/{{ session.id }}/models" hx-trigger="change">
+      {% if ctx.provider_missing %}<option value="" selected disabled>Choose an available provider…</option>{% endif %}
+      {% for p in ctx.providers %}<option value="{{ p.id }}" {{ 'selected' if p.id == ctx.selected_provider else '' }}>{{ p.name }}</option>{% endfor %}
+    </select>
+    {% else %}
+    <input id="provider-choice" type="hidden" name="provider" value="{{ ctx.selected_provider }}">
+    {% endif %}
+    <label class="sr-only" for="model-choice">Model for the next message</label>
+    <select id="model-choice" name="model" hx-post="/sessions/{{ session.id }}/model" hx-trigger="change" hx-include="#provider-choice" {% if ctx.provider_missing %}disabled{% endif %}>
+      {% if not ctx.selected_model %}<option value="" selected disabled>Choose a model…</option>{% endif %}
+      {% for m in ctx.models | sort_models(ctx.usage) %}<option value="{{ m }}" {{ 'selected' if m == ctx.selected_model else '' }}>{{ m }}</option>{% endfor %}
+    </select>
+    <button type="button" class="btn-refresh" hx-post="/sessions/{{ session.id }}/model/refresh" hx-include="#provider-choice" title="Refresh model list" aria-label="Refresh model list">↻</button>
+  </div>
+  {% if ctx.pending_provider %}<span class="model-selection-note muted" role="status">Choose a model to apply. Still using {{ session.provider }} / {{ session.model or 'no model' }}.</span>{% endif %}
+  {% if ctx.catalog_error %}<span class="model-selection-note error-text" role="status">{{ ctx.catalog_error }}</span>{% endif %}
+</div>

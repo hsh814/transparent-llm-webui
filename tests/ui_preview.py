@@ -15,7 +15,7 @@ _failed_once: set[str] = set()
 _response_versions: dict[str, int] = {}
 
 
-def preview_stream(model, messages, params, *, tools=None):
+def preview_stream(model, messages, params, *, tools=None, provider='ollama'):
     user_index = max(i for i, message in enumerate(messages) if message["role"] == "user")
     source = messages[user_index]["content"]
     if isinstance(source, list):
@@ -122,7 +122,7 @@ def preview_stream(model, messages, params, *, tools=None):
     yield {"type": "done", "usage": {"prompt_tokens": 12, "completion_tokens": 28, "total_tokens": 40}}
 
 
-def preview_search(query, max_results=5):
+def preview_search(query, max_results=5, *, provider="ollama"):
     if type(max_results) is not int or not 1 <= max_results <= 5:
         raise AssertionError("An invalid search must not reach the provider.")
     time.sleep(0.4)
@@ -132,7 +132,7 @@ def preview_search(query, max_results=5):
              "content": "Table 1 reports 42 samples; Figure 1 compares the two methods."}]
 
 
-def preview_fetch(url):
+def preview_fetch(url, *, provider="ollama"):
     if url == "https://example.org/missing":
         time.sleep(0.4)
         ollama.httpx.Response(404, request=ollama.httpx.Request(
@@ -162,8 +162,8 @@ def preview_fetch(url):
     }
 
 
-ollama.list_models = lambda: ["gemma4:31b", "qwen3:32b", "gpt-oss:120b"]
-ollama.model_context_length = lambda model: 32768
+ollama.list_models = lambda provider="ollama": ["gemma4:31b", "qwen3:32b", "gpt-oss:120b"]
+ollama.model_context_length = lambda model, provider="ollama": 32768
 ollama.chat_stream = preview_stream
 ollama.web_search = preview_search
 ollama.web_fetch = preview_fetch

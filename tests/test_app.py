@@ -89,7 +89,7 @@ def web_http_error(status, path="/api/web_fetch"):
     return httpx.HTTPStatusError("Private provider exception", request=request, response=response)
 
 
-def search_stream(model, messages, params, *, tools=None):
+def search_stream(model, messages, params, *, tools=None, provider='ollama'):
     if messages[-1]["role"] != "tool":
         yield {"type": "content", "text": "Checking the sources."}
         yield {"type": "done", "finish_reason": "tool_calls", "tool_calls": [search_call()],
@@ -245,7 +245,7 @@ class AppTests(unittest.TestCase):
                 base = db.list_generations(sid)[0]["base_request"]
                 requests = []
 
-                def read_paper(model, messages, params, *, tools=None):
+                def read_paper(model, messages, params, *, tools=None, provider='ollama'):
                     requests.append(json.loads(json.dumps({"messages": messages, "tools": tools})))
                     outcomes = [message for message in messages if message["role"] == "tool"]
                     if discover and not outcomes:
@@ -264,9 +264,9 @@ class AppTests(unittest.TestCase):
                         patch.object(ollama, "web_search", return_value=search_results) as search, \
                         patch.object(ollama, "web_fetch", return_value=evidence) as fetch:
                     generation._generate(db.claim_generation(sid))
-                    fetch.assert_called_once_with(url)
+                    fetch.assert_called_once_with(url, provider="ollama")
                     if discover:
-                        search.assert_called_once_with("paper discovery", max_results=1)
+                        search.assert_called_once_with("paper discovery", max_results=1, provider="ollama")
                     else:
                         search.assert_not_called()
                 saved = db.list_generations(sid)[0]
@@ -332,7 +332,7 @@ class AppTests(unittest.TestCase):
                 bad = fetch_call(call_id="bad-fetch")
                 bad["function"]["arguments"] = json.dumps(arguments)
 
-                def correct_url(model, messages, params, *, tools=None):
+                def correct_url(model, messages, params, *, tools=None, provider='ollama'):
                     outcomes = [message for message in messages if message["role"] == "tool"]
                     if not outcomes:
                         call = bad
@@ -356,7 +356,7 @@ class AppTests(unittest.TestCase):
                         patch.object(db, "start_tool", wraps=db.start_tool) as started:
                     generation._generate(db.claim_generation(sid))
                     search.assert_not_called()
-                    fetch.assert_called_once_with("https://example.org/paper")
+                    fetch.assert_called_once_with("https://example.org/paper", provider="ollama")
                     self.assertEqual([call.args[1] for call in started.call_args_list], ["fixed-fetch"])
                 saved = db.list_generations(sid)[0]
                 self.assertEqual(saved["status"], "completed")
@@ -372,7 +372,7 @@ class AppTests(unittest.TestCase):
                 sid = db.create_session(folder["id"], model="test-model")["id"]
                 self.client.post(f"/sessions/{sid}/send", data={"content": "A normal question"})
 
-                def unpermitted_fetch(model, messages, params, *, tools=None):
+                def unpermitted_fetch(model, messages, params, *, tools=None, provider='ollama'):
                     self.assertEqual(tools, [])
                     yield {"type": "done", "finish_reason": "tool_calls",
                            "tool_calls": [search_call(), fetch_call()]}
@@ -398,7 +398,7 @@ class AppTests(unittest.TestCase):
         calls[3] = fetch_call("not an absolute URL", "call-3")
         requests = []
 
-        def oversized_mixed_batch(model, messages, params, *, tools=None):
+        def oversized_mixed_batch(model, messages, params, *, tools=None, provider='ollama'):
             requests.append(json.loads(json.dumps({"messages": messages, "tools": tools})))
             if not any(message["role"] == "tool" for message in messages):
                 yield {"type": "done", "finish_reason": "tool_calls", "tool_calls": calls}
@@ -443,7 +443,7 @@ class AppTests(unittest.TestCase):
         self.client.post(f"/sessions/{self.sid}/send", data={"content": "Compare the paper", "web_search": "true"})
         calls = [search_call("paper", "search-first", 1), fetch_call()]
 
-        def mixed_batch(model, messages, params, *, tools=None):
+        def mixed_batch(model, messages, params, *, tools=None, provider='ollama'):
             if messages[-1]["role"] != "tool":
                 yield {"type": "reasoning", "text": "Read the selected source"}
                 yield {"type": "done", "finish_reason": "tool_calls", "tool_calls": calls}
@@ -459,7 +459,7 @@ class AppTests(unittest.TestCase):
                 patch.object(ollama, "web_fetch", side_effect=httpx.ConnectError("private provider detail")):
             generation._generate(db.claim_generation(self.sid))
             self.assertEqual(model.call_count, 1)
-            search.assert_called_once_with("paper", max_results=1)
+            search.assert_called_once_with("paper", max_results=1, provider="ollama")
         failed = db.list_generations(self.sid)[0]
         self.assertEqual(failed["status"], "failed")
         self.assertEqual([event["status"] for event in failed["trace"]], ["completed", "completed", "failed"])
@@ -472,7 +472,7 @@ class AppTests(unittest.TestCase):
                 patch.object(ollama, "web_fetch", return_value=evidence) as fetch:
             generation._generate(db.claim_generation(self.sid))
             search.assert_not_called()
-            fetch.assert_called_once_with("https://example.org/paper")
+            fetch.assert_called_once_with("https://example.org/paper", provider="ollama")
             self.assertEqual(model.call_count, 1)
         completed = db.list_generations(self.sid)[0]
         self.assertEqual(completed["status"], "completed")
@@ -501,7 +501,7 @@ class AppTests(unittest.TestCase):
         def provider_client(*args, **kwargs):
             return real_client(*args, **kwargs, transport=httpx.MockTransport(provider))
 
-        def recover(model, messages, params, *, tools=None):
+        def recover(model, messages, params, *, tools=None, provider='ollama'):
             requests.append(json.loads(json.dumps(messages)))
             outcomes = [message for message in messages if message["role"] == "tool"]
             if not outcomes:
@@ -554,7 +554,7 @@ class AppTests(unittest.TestCase):
     def test_missing_fetches_consume_budget_and_allow_a_tools_free_final_answer(self):
         self.client.post(f"/sessions/{self.sid}/send", data={"content": "Check these sources", "web_search": "true"})
 
-        def all_missing(model, messages, params, *, tools=None):
+        def all_missing(model, messages, params, *, tools=None, provider='ollama'):
             outcomes = [message for message in messages if message["role"] == "tool"]
             if not outcomes:
                 yield {"type": "done", "finish_reason": "tool_calls", "tool_calls": [
@@ -582,7 +582,7 @@ class AppTests(unittest.TestCase):
     def test_missing_fetch_outcome_is_reused_on_retry_event_fork_and_edited_fork(self):
         self.client.post(f"/sessions/{self.sid}/send", data={"content": "Read the page", "web_search": "true"})
 
-        def interrupted_answer(model, messages, params, *, tools=None):
+        def interrupted_answer(model, messages, params, *, tools=None, provider='ollama'):
             if messages[-1]["role"] == "tool":
                 raise httpx.ReadError("Interrupted model connection")
             yield {"type": "done", "finish_reason": "tool_calls", "tool_calls": [fetch_call()]}
@@ -595,7 +595,7 @@ class AppTests(unittest.TestCase):
         self.assertEqual(failed["status"], "failed")
         self.assertEqual(failed["trace"][-1]["status"], "unavailable")
 
-        def finish_from_saved(model, messages, params, *, tools=None):
+        def finish_from_saved(model, messages, params, *, tools=None, provider='ollama'):
             self.assertEqual(messages[-1], failed["trace"][-1]["message"])
             yield {"type": "content", "text": "The page could not be retrieved; the claim remains unverified."}
             yield {"type": "done"}
@@ -645,7 +645,7 @@ class AppTests(unittest.TestCase):
                 self.client.post(f"/sessions/{sid}/send", data={"content": "Check this", "web_search": "true"})
                 error = web_http_error(code, "/v1/chat/completions" if name == "model" else f"/api/{name}")
 
-                def request_tool(model, messages, params, *, tools=None):
+                def request_tool(model, messages, params, *, tools=None, provider='ollama'):
                     if name == "model":
                         raise error
                     yield {"type": "done", "finish_reason": "tool_calls",
@@ -666,10 +666,10 @@ class AppTests(unittest.TestCase):
         self.client.post(f"/sessions/{self.sid}/send", data={"content": "Read this", "web_search": "true"})
         queued = []
 
-        def request_tool(model, messages, params, *, tools=None):
+        def request_tool(model, messages, params, *, tools=None, provider='ollama'):
             yield {"type": "done", "finish_reason": "tool_calls", "tool_calls": [fetch_call()]}
 
-        def interrupted_fetch(url):
+        def interrupted_fetch(url, *, provider="ollama"):
             db.interrupt_generations(self.sid, "Stopped", status="cancelled")
             self.assertTrue(db.retry_generations(self.sid, web_search=False))
             queued.append(db.list_generations(self.sid)[0])
@@ -686,7 +686,7 @@ class AppTests(unittest.TestCase):
         self.client.post(f"/sessions/{self.sid}/send", data={"content": "Original research", "web_search": "true"})
         evidence = {"title": "Paper", "content": "Unique immutable fetched evidence\n  " * 600, "links": ["/details"]}
 
-        def mixed_batch(model, messages, params, *, tools=None):
+        def mixed_batch(model, messages, params, *, tools=None, provider='ollama'):
             if messages[-1]["role"] != "tool":
                 yield {"type": "reasoning", "text": "Preserved fetch planning"}
                 yield {"type": "done", "finish_reason": "tool_calls",
@@ -717,7 +717,7 @@ class AppTests(unittest.TestCase):
                     generation._generate(db.claim_generation(fork["id"]))
                     search.assert_not_called()
                     if allowed and not after_fetch:
-                        fetch.assert_called_once_with("https://example.org/paper")
+                        fetch.assert_called_once_with("https://example.org/paper", provider="ollama")
                     else:
                         fetch.assert_not_called()
                     self.assertEqual(model.call_count, int(after_fetch or allowed))
@@ -750,7 +750,7 @@ class AppTests(unittest.TestCase):
         self.assertEqual(retained["messages"][-1], source["messages"][-1])
         self.assertEqual(retained["messages"][1]["content"], "Edited question using the recorded page")
 
-        def use_retained(model, messages, params, *, tools=None):
+        def use_retained(model, messages, params, *, tools=None, provider='ollama'):
             self.assertEqual(tools, [])
             self.assertEqual(json.loads(messages[-1]["content"])["content"], evidence["content"])
             yield {"type": "content", "text": "Edited answer from retained evidence"}
@@ -771,7 +771,7 @@ class AppTests(unittest.TestCase):
         self.client.post(f"/sessions/{self.sid}/send", data={"content": "Verify the quote", "web_search": "true"})
         requests = []
 
-        def correct_searches(model, messages, params, *, tools=None):
+        def correct_searches(model, messages, params, *, tools=None, provider='ollama'):
             requests.append(json.loads(json.dumps(messages)))
             results = [message for message in messages if message["role"] == "tool"]
             yield {"type": "reasoning", "text": "Check the search result limit."}
@@ -818,7 +818,7 @@ class AppTests(unittest.TestCase):
                 sid = db.create_session(self.folder["id"], model="test-model")["id"]
                 self.client.post(f"/sessions/{sid}/send", data={"content": "Research", "web_search": "true"})
 
-                def decline_after_error(model, messages, params, *, tools=None):
+                def decline_after_error(model, messages, params, *, tools=None, provider='ollama'):
                     if messages[-1]["role"] != "tool":
                         call = search_call()
                         call["function"]["arguments"] = json.dumps(arguments)
@@ -840,7 +840,7 @@ class AppTests(unittest.TestCase):
     def test_mixed_search_batch_preserves_valid_results_and_corrects_only_invalid_call(self):
         self.client.post(f"/sessions/{self.sid}/send", data={"content": "Compare", "web_search": "true"})
 
-        def mixed_batch(model, messages, params, *, tools=None):
+        def mixed_batch(model, messages, params, *, tools=None, provider='ollama'):
             results = [message for message in messages if message["role"] == "tool"]
             if not results:
                 calls = [search_call("Good query", "good", 1), search_call("Bad query", "bad", 10)]
@@ -873,7 +873,7 @@ class AppTests(unittest.TestCase):
         self.assertEqual(db.list_generations(self.sid)[0]["trace"][1]["status"], "failed")
         self.assertTrue(db.retry_generations(self.sid, web_search=True))
 
-        def repair_saved_call(model, messages, params, *, tools=None):
+        def repair_saved_call(model, messages, params, *, tools=None, provider='ollama'):
             result = json.loads(messages[-1]["content"])
             if result.get("error_type") == "invalid_arguments":
                 self.assertEqual(messages[-1]["tool_call_id"], "old-invalid")
@@ -887,13 +887,13 @@ class AppTests(unittest.TestCase):
                 patch.object(ollama, "web_search", return_value=[]) as search:
             generation._generate(db.claim_generation(self.sid))
             self.assertEqual(model.call_count, 2)
-            search.assert_called_once_with("Saved query", max_results=5)
+            search.assert_called_once_with("Saved query", max_results=5, provider="ollama")
         self.assertEqual(db.list_generations(self.sid)[0]["status"], "completed")
 
     def test_rejected_call_survives_failed_continuation_retry_and_forks(self):
         self.client.post(f"/sessions/{self.sid}/send", data={"content": "Research", "web_search": "true"})
 
-        def fail_after_rejection(model, messages, params, *, tools=None):
+        def fail_after_rejection(model, messages, params, *, tools=None, provider='ollama'):
             if messages[-1]["role"] == "tool":
                 raise httpx.ConnectError("Model offline")
             yield {"type": "done", "finish_reason": "tool_calls",
@@ -912,7 +912,7 @@ class AppTests(unittest.TestCase):
         edited = db.save_edited_fork(fork["id"], draft, send=True)
         self.assertTrue(db.retry_generations(self.sid, web_search=False))
         for sid in (self.sid, edited["id"]):
-            def finish_without_search(model, messages, params, *, tools=None):
+            def finish_without_search(model, messages, params, *, tools=None, provider='ollama'):
                 self.assertEqual(json.loads(messages[-1]["content"])["error_type"], "invalid_arguments")
                 self.assertEqual(tools, [])
                 yield {"type": "content", "text": "Finished without searching"}
@@ -928,7 +928,7 @@ class AppTests(unittest.TestCase):
     def test_repeated_invalid_searches_use_the_budget_then_finalize_without_searching(self):
         self.client.post(f"/sessions/{self.sid}/send", data={"content": "Research", "web_search": "true"})
 
-        def always_invalid(model, messages, params, *, tools=None):
+        def always_invalid(model, messages, params, *, tools=None, provider='ollama'):
             index = sum(message["role"] == "tool" for message in messages)
             if not tools:
                 self.assertEqual(index, 8)
@@ -959,7 +959,7 @@ class AppTests(unittest.TestCase):
                 sid = db.create_session(self.folder["id"], model="test-model")["id"]
                 self.client.post(f"/sessions/{sid}/send", data={"content": "Research", "web_search": str(allowed).lower()})
 
-                def invalid_or_unknown(model, messages, params, *, tools=None):
+                def invalid_or_unknown(model, messages, params, *, tools=None, provider='ollama'):
                     calls = [search_call("Query", "bad", 10)]
                     if allowed:
                         calls = [search_call("Valid query", "valid", 5), search_call("Other", "unknown", 2)]
@@ -994,7 +994,7 @@ class AppTests(unittest.TestCase):
     def test_thinking_survives_tool_rounds_and_the_next_user_turn(self):
         requests = []
 
-        def think_and_search(model, messages, params, *, tools=None):
+        def think_and_search(model, messages, params, *, tools=None, provider='ollama'):
             requests.append(json.loads(json.dumps(messages)))
             round_number = sum(message["role"] == "tool" for message in messages)
             if round_number < 2:
@@ -1095,7 +1095,7 @@ class AppTests(unittest.TestCase):
         self.assertEqual(manual["provenance"]["source_reasoning"], "First thought")
 
     def test_tool_thinking_edit_preserves_calls_results_and_original_request(self):
-        def reasoning_search(model, messages, params, *, tools=None):
+        def reasoning_search(model, messages, params, *, tools=None, provider='ollama'):
             if messages[-1]["role"] != "tool":
                 yield {"type": "reasoning", "text": "Original search thought"}
             yield from search_stream(model, messages, params, tools=tools)
@@ -1193,7 +1193,7 @@ class AppTests(unittest.TestCase):
         self.assertEqual(db.list_generations(self.sid)[-1]["messages"][2]["reasoning"], "Second version reasoning")
 
     def test_search_retry_and_event_fork_replay_saved_tool_thinking(self):
-        def reasoning_search(model, messages, params, *, tools=None):
+        def reasoning_search(model, messages, params, *, tools=None, provider='ollama'):
             if messages[-1]["role"] != "tool":
                 yield {"type": "reasoning", "text": "Plan before search"}
             yield from search_stream(model, messages, params, tools=tools)
@@ -1453,7 +1453,7 @@ class AppTests(unittest.TestCase):
         user = db.visible_messages(call_fork["id"])[0]
         db.request_response(call_fork["id"], user["id"], web_search=True)
 
-        def keep_searching(model, messages, params, *, tools=None):
+        def keep_searching(model, messages, params, *, tools=None, provider='ollama'):
             index = sum(message["role"] == "tool" for message in messages)
             if not tools:
                 yield {"type": "content", "text": "Answer from the reexecuted searches"}
@@ -1706,7 +1706,7 @@ class AppTests(unittest.TestCase):
         with patch.object(ollama, "web_search", return_value=[]) as search, \
                 patch.object(ollama, "chat_stream", side_effect=search_stream) as model:
             generation._generate(db.claim_generation(self.sid))
-            search.assert_called_once_with("model-selected query", max_results=2)
+            search.assert_called_once_with("model-selected query", max_results=2, provider="ollama")
             self.assertEqual(model.call_count, 1)
             self.assertEqual(model.call_args.args[1][-1]["role"], "tool")
         completed = db.list_generations(self.sid)[0]
@@ -1747,7 +1747,7 @@ class AppTests(unittest.TestCase):
                          files=[("files", ("figure.png", image_png(), "image/png"))])
         results = [{"title": "Source", "url": "https://example.org/paper", "content": "Reported value: 42"}]
 
-        def fail_after_search(model, messages, params, *, tools=None):
+        def fail_after_search(model, messages, params, *, tools=None, provider='ollama'):
             if messages[-1]["role"] == "tool":
                 raise httpx.ConnectError("offline")
             yield from search_stream(model, messages, params, tools=tools)
@@ -1807,7 +1807,7 @@ class AppTests(unittest.TestCase):
         calls = [search_call("first query", "call-1"), search_call("second query", "call-2")]
         requests = []
 
-        def model(model, messages, params, *, tools=None):
+        def model(model, messages, params, *, tools=None, provider='ollama'):
             requests.append({"messages": messages, "tools": tools})
             if messages[-1]["role"] != "tool":
                 yield {"type": "done", "finish_reason": "tool_calls", "tool_calls": calls}
@@ -1861,7 +1861,7 @@ class AppTests(unittest.TestCase):
         with patch.object(ollama, "web_search", side_effect=results) as search, \
                 patch.object(ollama, "chat_stream", side_effect=model):
             generation._generate(db.claim_generation(result_fork["id"]))
-            search.assert_called_once_with("second query", max_results=2)
+            search.assert_called_once_with("second query", max_results=2, provider="ollama")
         completed = db.list_generations(result_fork["id"])[0]
         self.assertEqual(completed["status"], "completed")
         self.assertEqual(completed["messages"][:4], source["messages"][:4])
@@ -1910,7 +1910,7 @@ class AppTests(unittest.TestCase):
         base = db.list_generations(self.sid)[0]["base_request"]["messages"]
         requests = []
 
-        def three_at_a_time(model, messages, params, *, tools=None):
+        def three_at_a_time(model, messages, params, *, tools=None, provider='ollama'):
             requests.append(json.loads(json.dumps({"messages": messages, "tools": tools})))
             count = sum(message["role"] == "tool" for message in messages)
             if not tools:
@@ -1980,7 +1980,7 @@ class AppTests(unittest.TestCase):
         self.assertTrue(all(group["complete"] for group in snapshot["tool_groups"]))
         retained = db.save_edited_fork(rejected_fork["id"], draft, send=True, web_search=True)
 
-        def use_retained_evidence(model, messages, params, *, tools=None):
+        def use_retained_evidence(model, messages, params, *, tools=None, provider='ollama'):
             self.assertTrue(tools)
             self.assertEqual(sum(message["role"] == "tool" for message in messages), 9)
             self.assertNotEqual(messages[-1]["role"], "system")
@@ -2001,7 +2001,7 @@ class AppTests(unittest.TestCase):
     def test_event_fork_preserves_budget_but_retained_edits_and_regeneration_reset_it(self):
         self.client.post(f"/sessions/{self.sid}/send", data={"content": "Research", "web_search": "true"})
 
-        def four_at_a_time(model, messages, params, *, tools=None):
+        def four_at_a_time(model, messages, params, *, tools=None, provider='ollama'):
             count = sum(message["role"] == "tool" for message in messages)
             if not tools:
                 yield {"type": "content", "text": "Answer after eight searches"}
@@ -2028,7 +2028,7 @@ class AppTests(unittest.TestCase):
             with self.subTest(session=sid, remaining=expected_remaining):
                 requests = []
 
-                def spend_available_budget(model, messages, params, *, tools=None):
+                def spend_available_budget(model, messages, params, *, tools=None, provider='ollama'):
                     requests.append(bool(tools))
                     if not tools:
                         yield {"type": "content", "text": "Answer from this branch"}
@@ -2057,7 +2057,7 @@ class AppTests(unittest.TestCase):
         self.client.post(f"/sessions/{self.sid}/send", data={"content": "Research", "web_search": "true"})
         final_requests = []
 
-        def fail_final_answer(model, messages, params, *, tools=None):
+        def fail_final_answer(model, messages, params, *, tools=None, provider='ollama'):
             if tools:
                 yield {"type": "done", "finish_reason": "tool_calls",
                        "tool_calls": [search_call(f"query {index}", f"call-{index}") for index in range(8)]}
@@ -2080,7 +2080,7 @@ class AppTests(unittest.TestCase):
         self.assertEqual(failed["tools"], [])
         self.assertTrue(db.retry_generations(self.sid, web_search=True))
 
-        def answer_after_failure(model, messages, params, *, tools=None):
+        def answer_after_failure(model, messages, params, *, tools=None, provider='ollama'):
             self.assertEqual(tools, [])
             self.assertEqual(messages, final_requests[0])
             yield {"type": "content", "text": "Recovered final answer"}
@@ -2113,7 +2113,7 @@ class AppTests(unittest.TestCase):
         failed = db.list_generations(self.sid)[0]
         self.assertTrue(db.retry_generations(self.sid, web_search=True))
 
-        def finish_old_batch(model, messages, params, *, tools=None):
+        def finish_old_batch(model, messages, params, *, tools=None, provider='ollama'):
             self.assertEqual(tools, [])
             self.assertEqual(messages[-1]["role"], "system")
             self.assertEqual(messages[2]["content"], "Saved search plan")
@@ -2139,7 +2139,7 @@ class AppTests(unittest.TestCase):
     def test_invalid_attempts_share_the_search_budget_with_valid_calls(self):
         self.client.post(f"/sessions/{self.sid}/send", data={"content": "Research", "web_search": "true"})
 
-        def mixed_rounds(model, messages, params, *, tools=None):
+        def mixed_rounds(model, messages, params, *, tools=None, provider='ollama'):
             count = sum(message["role"] == "tool" for message in messages)
             if not tools:
                 self.assertEqual(count, 9)
@@ -2179,7 +2179,7 @@ class AppTests(unittest.TestCase):
                 if allowed:
                     calls[-1]["function"]["name"] = "unoffered_tool"
 
-                def oversized_batch(model, messages, params, *, tools=None):
+                def oversized_batch(model, messages, params, *, tools=None, provider='ollama'):
                     self.assertEqual(bool(tools), allowed)
                     yield {"type": "done", "finish_reason": "tool_calls", "tool_calls": calls}
 
@@ -2195,7 +2195,7 @@ class AppTests(unittest.TestCase):
     def test_provider_ignoring_tools_free_finalization_fails_once_and_can_retry(self):
         self.client.post(f"/sessions/{self.sid}/send", data={"content": "Research", "web_search": "true"})
 
-        def keep_searching(model, messages, params, *, tools=None):
+        def keep_searching(model, messages, params, *, tools=None, provider='ollama'):
             index = sum(message["role"] == "tool" for message in messages) + 1
             yield {"type": "done", "finish_reason": "tool_calls",
                    "tool_calls": [search_call(f"query {index}", f"call-{index}")]}
@@ -2217,7 +2217,7 @@ class AppTests(unittest.TestCase):
         self.assertNotIn("started_at", outcomes[-1])
         self.assertTrue(db.retry_generations(self.sid, web_search=True))
 
-        def answer_on_retry(model, messages, params, *, tools=None):
+        def answer_on_retry(model, messages, params, *, tools=None, provider='ollama'):
             self.assertEqual(tools, [])
             self.assertEqual(messages[-1]["role"], "system")
             self.assertEqual(sum(message["role"] == "tool" for message in messages), 9)
@@ -2283,7 +2283,7 @@ class AppTests(unittest.TestCase):
                     captured.append(json.loads(request.content))
                     return httpx.Response(200, text='data: {"choices":[{"delta":{"content":"Answer"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n')
 
-                with patch.object(ollama, "_client", side_effect=lambda: httpx.Client(
+                with patch.object(ollama, "_client", side_effect=lambda provider="ollama": httpx.Client(
                     base_url="https://example.test/v1", transport=httpx.MockTransport(respond)
                 )):
                     generation._generate(db.claim_generation(sid))
@@ -2968,10 +2968,18 @@ class OllamaTests(unittest.TestCase):
         def provider_client(*args, **kwargs):
             return real_client(*args, **kwargs, transport=httpx.MockTransport(respond))
 
-        with patch.object(ollama, "API_BASE", "https://provider.example"), \
-                patch.dict(os.environ, {"OLLAMA_API_KEY": "fetch-provider-key"}), \
-                patch.object(ollama.httpx, "Client", side_effect=provider_client):
-            result = ollama.web_fetch(target)
+        with TemporaryDirectory() as directory:
+            config = Path(directory) / "providers.json"
+            config.write_text(json.dumps([{
+                "id": "ollama", "name": "Ollama", "kind": "ollama",
+                "base_url": "https://provider.example/v1",
+                "native_base_url": "https://provider.example",
+                "api_key_env": "OLLAMA_API_KEY",
+            }]), encoding="utf-8")
+            with patch.dict(os.environ, {"LLM_PROVIDERS_FILE": str(config),
+                                         "OLLAMA_API_KEY": "fetch-provider-key"}), \
+                    patch.object(ollama.httpx, "Client", side_effect=provider_client):
+                result = ollama.web_fetch(target)
         self.assertEqual(result, evidence)
         self.assertEqual(len(requests), 1)
         self.assertEqual(requests[0].method, "POST")

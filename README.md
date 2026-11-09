@@ -1,6 +1,6 @@
 # Transparent Chat
 
-A single-user workspace for conversations, translation, and notes, with image/PDF attachments and opt-in web search and page fetching. FastAPI, htmx, and SQLite; no frontend build step or JavaScript framework. Model requests go to Ollama Cloud.
+A single-user workspace for conversations, translation, and notes, with image/PDF attachments and opt-in web search and page fetching. FastAPI, htmx, and SQLite; no frontend build step or JavaScript framework. Model requests go to the selected Ollama or OpenAI-compatible provider.
 
 ## Setup and run
 
@@ -20,6 +20,42 @@ uv run uvicorn app:app --host 127.0.0.1 --port 8000
 
 Open `http://localhost:8000`. An API key is required at startup. Run **one application worker**: generation workers and restart recovery are coordinated within a single process. This is a local, single-user application without authentication; do not expose it publicly.
 
+### Register multiple providers
+
+Provider registrations live in the repository's [providers.json](providers.json), which is safe to track in Git. It contains public endpoint URLs and **environment-variable names**, never API key values. Keep keys in the gitignored `.env` or the server environment:
+
+```dotenv
+OLLAMA_API_KEY=your-ollama-key
+OPENROUTER_API_KEY=your-openrouter-key
+```
+
+Only providers with nonblank keys appear in the selector. Missing/empty keys disable those registrations without preventing other providers from working. The app requires at least one active provider at startup; malformed nonempty keys still produce a configuration error. A single active provider skips the provider dropdown.
+
+The shipped registrations are:
+
+| Provider | Key environment variable |
+|---|---|
+| Ollama | `OLLAMA_API_KEY` |
+| OpenAI | `OPENAI_API_KEY` |
+| [OpenRouter](https://openrouter.ai/docs/quickstart) | `OPENROUTER_API_KEY` |
+| [Groq](https://console.groq.com/docs/openai) | `GROQ_API_KEY` |
+| [DeepSeek](https://api-docs.deepseek.com/) | `DEEPSEEK_API_KEY` |
+| [Mistral](https://docs.mistral.ai/resources/migration-guides) | `MISTRAL_API_KEY` |
+
+Enable only the services you use; the preset file does not grant API access or guarantee that every listed model supports the same settings.
+
+Edit `providers.json` to add providers or accounts. It is a nonempty JSON array; every registration requires a unique stable `id`, display `name`, `base_url`, and `api_key_env`. Use separate IDs and key variables for multiple accounts at the same service. Keep IDs stable: saved requests refer to them, so do not reuse an ID for an unrelated service. Restart the app after changing registrations or keys.
+
+The default file is resolved beside `providers.py`, independently of the working directory. Optional `LLM_PROVIDERS_FILE=/path/to/providers.json` selects another file; relative override paths are relative to the server's working directory. File registrations are cached until restart. `LLM_PROVIDERS`, `OLLAMA_API_BASE_URL`, and `OLLAMA_OPENAI_BASE_URL` are no longer read: move custom registrations/URLs into the JSON file.
+
+- `kind`: `openai` (default) or `ollama`. Both use `GET <base_url>/models` and `POST <base_url>/chat/completions` with bearer authentication. Anthropic-native, Gemini-native, Azure-specific authentication, and Responses-only APIs are not adapters supported by this client; use a compatible endpoint where available.
+- `native_base_url`: Ollama-only metadata/search/fetch root, without `/api`. When omitted, derived by removing a trailing `/v1` from `base_url`.
+- `default_model`: optional model ID for new sessions with no inherited or previously used selection. If omitted, choose a model before sending. No network lookup silently selects a model.
+
+The shipped `ollama` registration preserves existing `OLLAMA_API_KEY` installations and historical provider IDs. Removing a key hides that provider from selectable choices but does not change saved pairs or reroute queued/retried requests. A chat using an unavailable provider requires its key to be restored, or an explicit new provider/model selection for future messages. If only one provider remains active, its model list is shown directly, but the pair still changes only when a model is selected.
+
+Only OpenAI-compatible request/stream formats are shared. Supported parameters, reasoning fields, vision, and tool calling still depend on the provider and model; upstream incompatibilities fail visibly rather than silently changing the saved prompt. App web search/fetch tools and native context-size lookup remain Ollama-only. Other providers do not receive `/api/show`, `/api/web_search`, or `/api/web_fetch` requests.
+
 ## Using the workspace
 
 - **New chat** starts a conversation in the current folder, creating a Personal folder on first use. `⌘/Ctrl K` does the same.
@@ -27,7 +63,7 @@ Open `http://localhost:8000`. An API key is required at startup. Run **one appli
 - Titles use the first message or note, with whitespace normalized and a 60-character limit (including an ellipsis when truncated). No model call is needed. Empty chats get unique numbered labels. Click a title to rename it; changes save on blur or Enter. Clear it to restore the automatic title. Existing unnamed chats are backfilled on startup without changing their modification dates.
 - Each sidebar chat shows its last-modified date and time in your browser's timezone; hover the date for the full timestamp. Sending, receiving, renaming, changing settings, stopping/retrying, and deleting messages refresh it.
 - Use the folder menu to choose **Chat**, **Memo**, or **Translation**. Folder settings contain the name and system prompt, plus the translation chunk size.
-- The current model stays in the header. Open **Settings** to adjust reasoning effort, temperature, top P, maximum output tokens, or the random seed; click **Apply** to save.
+- Choose **provider → model** in the header. A single active provider skips the provider dropdown. Browsing another provider does not change the saved pair: select one of its models to apply it. Until then, sending uses the saved pair shown in the notice, or fails visibly if that provider no longer has a key. Refresh reloads only the browsed provider's catalog without choosing or changing a model. Settings-only updates also preserve the pair. Open **Settings** to adjust reasoning effort, temperature, top P, maximum output tokens, or the random seed; click **Apply** to save.
 - A configured folder system prompt is shown above the conversation and sent verbatim. An empty folder prompt adds no folder system message. App-authored final-answer instructions, when the web-tool budget is exhausted, are separately visible in Prompt.
 - On a desktop, Enter sends a chat message and Shift + Enter inserts a newline. Notes and translations use Enter for newlines and `⌘/Ctrl Enter` to submit. On touch devices, Enter inserts a newline.
 - Text drafts are stored per chat in browser local storage and cleared only after a successful submission. They survive navigation and reloads, including failed sends. Unsubmitted attachments stay in browser memory across chat navigation and failed sends, but are lost on reload; remove them individually before sending if needed.
@@ -39,12 +75,12 @@ Open `http://localhost:8000`. An API key is required at startup. Run **one appli
 
 ### Forks and response versions
 
-- **Fork** on a saved message creates an independent chat in the same folder, copying the visible conversation **through that message**. It copies only selected answers, not hidden alternatives or later turns. Message text, reasoning, and usage are copied; image/PDF inputs, saved requests, search results, and fetched page data use shared immutable references rather than duplicating their data. The new chat inherits the current model/settings and gets a distinct `· fork #<id>` title. Forking does not reprocess files, rerun tools, or request a model response; deleting the source chat does not delete its fork.
+- **Fork** on a saved message creates an independent chat in the same folder, copying the visible conversation **through that message**. It copies only selected answers, not hidden alternatives or later turns. Message text, reasoning, and usage are copied; image/PDF inputs, saved requests, search results, and fetched page data use shared immutable references rather than duplicating their data. The new chat inherits the current provider/model/settings and gets a distinct `· fork #<id>` title. Historical requests retain their own provider/model pair. Forking does not reprocess files, rerun tools, or request a model response; deleting the source chat does not delete its fork.
 - Forking at a **user message** copies its original text and attachments but excludes every subsequent tool call, result, and answer for that turn. Earlier selected turns retain their explicit history. **Request response** answers the existing user message without duplicating it, including after deleting its only answer.
 - **Fork through call** and **Fork through result** stop at that exact tool event. Later calls/results and the final answer are excluded. A fork through the first result of a multi-call batch includes only that result, not the remaining results. Event forks stay idle; **Continue response** explicitly resumes them. Web access permission defaults off in a new fork. If calls remain unresolved, enable permission to continue, or fork before the call; new user input cannot skip an unresolved idle call.
 - **Regenerate** keeps the selected answer and its tool history visible while producing a new version from the saved base input. The new attempt starts with no web calls of its own; the model may choose fresh searches or fetches if currently allowed. Use **← / →** and `1/3` to select an answer together with its own tool history. Only that selected version enters subsequent conversation history. Failure or Stop leaves the previous answer intact.
 - Once a turn has follow-up messages, its version controls are locked. Fork at that answer first to change it without making the existing follow-up history inconsistent.
-- Requesting again and regenerating reuse saved input/model/parameters, not current model settings; **web access permission always follows the current checkbox**. Retry/Continue reuse explicitly included resolved results, whereas regeneration does not inherit the regenerated answer's tool calls. Legacy turns without a saved request use current settings; their original answers remain labeled as reconstructed in Prompt. Memo conversations support Fork but never model-response actions.
+- Requesting again and regenerating reuse saved input/provider/model/parameters, not current model settings; **web access permission always follows the current checkbox**. Retry/Continue reuse explicitly included resolved results, whereas regeneration does not inherit the regenerated answer's tool calls. Legacy turns without a saved request use current settings; their original answers remain labeled as reconstructed in Prompt. Memo conversations support Fork but never model-response actions.
 - **Prompt** on each response version shows its immutable saved request. Token usage includes all model rounds in that response; session totals include all retained response versions. Deleting the final selected answer selects the nearest remaining version and its trace; deleting the only version clears that turn's trace and leaves the original user input unanswered. Message mutations and forks are blocked while generation is active.
 
 ### Batch editing into a fork
@@ -56,7 +92,7 @@ Open `http://localhost:8000`. An API key is required at startup. Run **one appli
 - Tool calls, arguments, and results are read-only; their assistant **Thinking** is editable. **Edit Thinking** on a tool request focuses its batch. A selection keeps a complete assistant tool-call batch together with every matching result, including recorded failures. Incomplete batches cannot be edited or included, and excluding the originating user excludes its tool history. From the first edited or excluded context item onward, tool batches default to **excluded**; explicitly select any historical results you want to reuse. Changing a batch's Thinking requires explicitly selecting that batch again. Reuse does not rerun searches or fetches, retry historical failures, or count their original model usage as new work.
 - **Allow fresh web access for Send** is a separate, off-by-default permission. It allows the model to request new searches and page fetches; it does not control whether explicitly selected historical results enter the edited context. The normal web-access indicator reflects this choice after Save & send.
 - Edited inputs, **User edited response**, and **Carried from earlier context** badges distinguish corrections from generated answers. Editing an assistant's answer or Thinking clears its current model and token attribution, but preserves unchanged Thinking. Manually edited Thinking is labeled separately. The source viewer preserves Thinking before the latest edit and the original generated Thinking; repeated forks do not turn manual work back into model-generated output. **Prompt** still shows that answer's actual historical request when known, never a fabricated request for the edited text; unknown requests remain explicitly unknown.
-- New requests and regeneration use the fork's rebuilt edited context and the model, parameters, and system prompt captured when saving the fork. Historical answer Prompts remain unchanged. An assistant kept without its originating user is context only, not an answer that can be regenerated against an unrelated user.
+- New requests and regeneration use the fork's rebuilt edited context and the provider/model pair, parameters, and system prompt captured when saving the edited fork. Historical answer Prompts remain unchanged. An assistant kept without its originating user is context only, not an answer that can be regenerated against an unrelated user.
 - Editing is blocked while the source is generating. If its messages, selected versions, settings, or folder context change in another tab, saving rejects the stale snapshot without creating a partial fork. The dialog keeps your edits and displays the error; reopen against the updated source before saving.
 
 ### Images, PDFs, and web tools
@@ -102,7 +138,7 @@ Deleting a message, chat, or folder removes shared data only when no remaining m
 
 ## Reliable generation and prompt history
 
-The send transaction saves the raw user input and base request: model, supported parameters, system prompt, attachments, ordered API messages, and allowed tools. The worker first calls the model. Each returned tool-call message is saved with that round's exact input and usage, then tool outcomes are persisted separately before the next model round. Current request, base request, and ordered trace use immutable shared roots; response versions own their snapshots. Search never modifies user content or the folder's system prompt.
+The send transaction saves the raw user input and base request: provider ID, model, supported parameters, system prompt, attachments, ordered API messages, and allowed tools. Changing the current selection cannot retarget queued chunks, retry, or regeneration. The worker first calls the saved provider/model. Each returned tool-call message is saved with that round's exact input and usage, then tool outcomes are persisted separately before the next model round. Current request, base request, and ordered trace use immutable shared roots; response versions own their snapshots. Search never modifies user content or the folder's system prompt.
 
 A background worker generates each response once. Generation state, partial output, reasoning, and errors are stored in SQLite. SSE connections display this state; they never initiate duplicate model calls. There is at most one live SSE connection per conversation view, including translation batches. Escaped HTML and multiline SSE framing preserve line breaks, indentation, and literal HTML in model output.
 
@@ -120,17 +156,16 @@ Older messages remain available. Unknown original requests are labeled as recons
 
 ### Supported model settings
 
-The app uses Ollama's `/v1/chat/completions` endpoint. Seed is sent as a top-level field. Context size, top K, and repeat penalty are not exposed as controls because this endpoint does not document support for those fields; old stored values are retained but omitted from new requests. See [Ollama's supported request fields](https://docs.ollama.com/api/openai-compatibility).
+The app uses each provider's OpenAI-compatible `/chat/completions` endpoint. Seed is sent as a top-level field. Context size, top K, and repeat penalty are not exposed as controls because the original Ollama endpoint does not document support for those fields; old stored values are retained but omitted from new requests. See [Ollama's supported request fields](https://docs.ollama.com/api/openai-compatibility). Other providers and models may accept different parameter values or reject unsupported settings; registering a provider does not imply compatibility with every model it lists.
 
-Context capacity is informational when it can be retrieved. Reasoning-level support depends on the model. The selected model remains available in the selector even if it disappears from the catalog. Metadata requests use short timeouts; successful lookups are cached for five minutes and failures for 30 seconds. The refresh button clears the cache.
+Context capacity is informational when it can be retrieved from Ollama; other providers manage it upstream. Reasoning-level support depends on the model. The selected model remains available in the selector even if it disappears from the catalog. Catalogs, context lookups, and model usage ordering are provider-specific, including identical model IDs at different services. Metadata requests use short timeouts; successful lookups are cached for five minutes and failures for 30 seconds. The refresh button clears only the selected catalog provider's cache.
 
 ## Configuration
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `OLLAMA_API_KEY` | Required | Ollama Cloud bearer token |
-| `OLLAMA_API_BASE_URL` | `https://ollama.com` | Native model metadata and web-search API |
-| `OLLAMA_OPENAI_BASE_URL` | `https://ollama.com/v1` | Model list and chat completions |
+| `LLM_PROVIDERS_FILE` | `providers.json` beside `providers.py` | Optional alternative registration file |
+| Provider key variables | Unset | See the provider table above; at least one must be nonblank |
 | `CHAT_DB_PATH` | `chat.db` beside `db.py` | Database path; useful for isolated development |
 
 Back up `chat.db` while the application is stopped to preserve your conversations and request history.
@@ -164,7 +199,9 @@ db.py            SQLite storage and atomic generation state transitions
 payloads.py      Shared immutable JSON nodes, content hashes, reference-aware reclamation
 generation.py    Background model/tool loop, durable continuation, safe errors
 tool_events.py   Web-tool schemas/guidance, shared budget, ordered API projection, usage
-ollama.py        API payloads, web search/fetch, response parsing, metadata cache
+providers.json   Git-trackable provider presets; endpoint URLs and key variable names only
+providers.py     File-based registrations and key-based provider availability
+ollama.py        Provider-routed API payloads, native web tools, response parsing, metadata cache
 inputs.py        Validated images, PDF page rendering/text extraction, content parts
 templating.py    Shared template helpers and ordered conversation rendering
 routers/         Folder, session, chat, fork, response-version, and prompt-viewer routes
@@ -175,5 +212,7 @@ tests/           Offline regression suite
 ```
 
 The principal routes remain HTML/SSE endpoints: `/folders`, `/folders/{id}/sessions`, `/sessions/{id}`, `/sessions/{id}/send`, `/sessions/{id}/stream?since=<user_message_id>`, `/sessions/{id}/memo`, `/sessions/{id}/messages`, and `/sessions/{id}/messages/{id}/prompt`. `/start` creates a chat, `/sessions/{id}/stop` cancels unfinished work, and `/sessions/{id}/retry` retries the latest failed or stopped submission. Message actions use POST `/sessions/{id}/messages/{id}/fork`, `/respond`, and `/regenerate`; version selection uses POST `/sessions/{id}/messages/{user_id}/variants/{assistant_id}/select`. Only the final **visible** message can be deleted, even when its selected response has an older database ID. Message mutations are blocked while work is active.
+
+Provider selection uses GET `/sessions/{id}/models?provider=<id>` to browse without saving, POST `/sessions/{id}/model` to save a complete provider/model pair or update settings, and POST `/sessions/{id}/model/refresh` with an optional `provider` field to refresh that provider's catalog without changing the saved pair.
 
 Tool events add POST `/sessions/{id}/messages/{user_id}/events/{index}/fork` with a required `trace_id` form value, and GET `/sessions/{id}/messages/{user_id}/events/{index}/prompt?trace_id=...` for assistant-call rounds. Trace hashes reject stale boundaries instead of silently forking or inspecting another response version.

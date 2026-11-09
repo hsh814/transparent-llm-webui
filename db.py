@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 
 import inputs
 import payloads
+import providers
 from tool_events import allowed_tools, api_messages, pending_calls, round_request
 
 DB_PATH = Path(os.environ.get("CHAT_DB_PATH", Path(__file__).parent / "chat.db"))
@@ -37,6 +38,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   folder_id INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
   title TEXT NOT NULL DEFAULT 'New Chat',
   auto_title INTEGER NOT NULL DEFAULT 1,
+  provider TEXT NOT NULL DEFAULT 'ollama',
   model TEXT NOT NULL DEFAULT 'gemma4:31b',
   params_json TEXT NOT NULL DEFAULT '{}',
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -50,6 +52,7 @@ CREATE TABLE IF NOT EXISTS messages (
   role TEXT NOT NULL,
   content TEXT NOT NULL,
   reasoning TEXT,
+  provider TEXT,
   model TEXT,
   reasoning_effort TEXT,
   prompt_tokens INTEGER,
@@ -115,6 +118,7 @@ def _get_conn() -> sqlite3.Connection:
 def _request_from_legacy(row: dict) -> dict:
     """Discard mutable lifecycle data from an old generation or variant snapshot."""
     return {
+        "provider": "ollama",
         "model": row["model"],
         "params": json.loads(row["params_json"]),
         "messages": json.loads(row["messages_json"]),
@@ -269,6 +273,72 @@ def _migrate_tool_traces(conn: sqlite3.Connection) -> None:
     if rebuild_all_users:
         conn.execute("PRAGMA user_version = 1")
 
+
+def _migrate_providers(conn: sqlite3.Connection) -> None:
+    """Rewrite immutable roots, never their nodes, in the startup transaction."""
+    session_cols = {row["name"] for row in conn.execute("PRAGMA table_info(sessions)")}
+    if "provider" not in session_cols:
+        conn.execute("ALTER TABLE sessions ADD COLUMN provider TEXT NOT NULL DEFAULT 'ollama'")
+    message_cols = {row["name"] for row in conn.execute("PRAGMA table_info(messages)")}
+    if "provider" not in message_cols:
+        conn.execute("ALTER TABLE messages ADD COLUMN provider TEXT")
+        conn.execute("UPDATE messages SET provider = 'ollama' WHERE model IS NOT NULL")
+    if conn.execute("PRAGMA user_version").fetchone()[0] >= 2:
+        return
+
+    def request(value: dict | None) -> dict | None:
+        return {"provider": "ollama", **value} if value is not None else None
+
+    def provenance(value: dict, source_request: dict | None = None) -> dict:
+        result = dict(value)
+        if "source_request" in result:
+            result["source_request"] = request(result["source_request"])
+        if "source_trace" in result:
+            result["source_trace"] = trace(result["source_trace"])
+        original = result.get("source_request") or source_request
+        result.setdefault("source_provider", original["provider"] if original else
+                          ("ollama" if result.get("source_model") is not None else None))
+        return result
+
+    def trace(value: list[dict]) -> list[dict]:
+        result = []
+        for event in value:
+            event = dict(event)
+            if "request" in event:
+                event["request"] = request(event["request"])
+            if event.get("provenance") is not None:
+                event["provenance"] = provenance(event["provenance"], event.get("request"))
+            result.append(event)
+        return result
+
+    store = payloads.Store(conn)
+    rewritten = {}
+    for table, key, columns in (
+        ("generations", "user_message_id",
+         (("request_id", request), ("base_request_id", request), ("trace_id", trace))),
+        ("response_variants", "assistant_message_id",
+         (("request_id", request), ("base_request_id", request), ("trace_id", trace))),
+        ("messages", "id", (("provenance_id", provenance),)),
+    ):
+        for row in conn.execute(f"SELECT {key}, {', '.join(name for name, _ in columns)} FROM {table}"):
+            changed = {}
+            for name, transform in columns:
+                old_id = row[name]
+                if old_id is None:
+                    continue
+                cache_key = (old_id, transform)
+                if cache_key not in rewritten:
+                    rewritten[cache_key] = store.put(transform(store.get(old_id)))
+                if rewritten[cache_key] != old_id:
+                    changed[name] = rewritten[cache_key]
+            if changed:
+                conn.execute(
+                    f"UPDATE {table} SET {', '.join(name + ' = ?' for name in changed)} WHERE {key} = ?",
+                    (*changed.values(), row[key]),
+                )
+    conn.execute("PRAGMA user_version = 2")
+
+
 def init_db() -> None:
     with _lock:
         conn = _get_conn()
@@ -314,6 +384,7 @@ def init_db() -> None:
                 " WHERE assistant_message_id IS NOT NULL"
             )
             _migrate_tool_traces(conn)
+            _migrate_providers(conn)
             for row in conn.execute("SELECT id FROM sessions WHERE auto_title = 1").fetchall():
                 _refresh_auto_title(conn, row["id"])
             payloads.collect(conn)
@@ -490,48 +561,53 @@ def get_session(session_id: int) -> dict | None:
     return dict(row) if row else None
 
 
-def model_usage() -> dict[str, int]:
-    """Map model id -> number of sessions using it."""
+def model_usage(provider: str = "ollama") -> dict[str, int]:
+    """Map model IDs to session counts within one provider, including removed ones."""
     with _lock:
         rows = _get_conn().execute(
-            "SELECT model, COUNT(*) AS n FROM sessions GROUP BY model"
+            "SELECT model, COUNT(*) AS n FROM sessions"
+            " WHERE provider = ? AND model != '' GROUP BY model", (provider,),
         ).fetchall()
     return {row["model"]: row["n"] for row in rows}
 
 
-def default_model() -> str:
-    """Most-used model, or the schema default when no sessions exist."""
-    usage = model_usage()
-    if not usage:
-        return "gemma4:31b"
-    return max(usage, key=usage.get)
+def default_model(provider: str = "ollama") -> str:
+    """Use this provider's most-used model, or its configured default."""
+    configured = providers.get_provider(provider)
+    usage = model_usage(provider)
+    return max(usage, key=usage.get) if usage else configured.default_model
 
 
 def last_params_session(folder_id: int) -> dict | None:
-    """Most recent session in the folder whose params were edited, or None."""
+    """Most recent params-edited session with a currently configured provider."""
+    configured = [provider.id for provider in providers.list_providers()]
     with _lock:
         row = _get_conn().execute(
             "SELECT * FROM sessions WHERE folder_id = ? AND params_updated_at IS NOT NULL"
+            f" AND provider IN ({', '.join('?' for _ in configured)})"
             " ORDER BY params_updated_at DESC, id DESC LIMIT 1",
-            (folder_id,),
+            (folder_id, *configured),
         ).fetchone()
     return dict(row) if row else None
 
 
 def create_session(
     folder_id: int, title: str = "New Chat", model: str | None = None,
-    params_json: str | None = None,
+    params_json: str | None = None, provider: str | None = None,
 ) -> dict:
-    if model is None or params_json is None:
-        src = last_params_session(folder_id)
+    src = last_params_session(folder_id) if provider is None or model is None or params_json is None else None
+    if provider is None:
+        provider = src["provider"] if src is not None else providers.default_provider().id
+    providers.get_provider(provider)
     if model is None:
-        model = src["model"] if src is not None else default_model()
+        model = src["model"] if src is not None and src["provider"] == provider else default_model(provider)
     if params_json is None:
         params_json = src["params_json"] if src is not None else json.dumps(DEFAULT_PARAMS)
     with _lock:
         cur = _get_conn().execute(
-            "INSERT INTO sessions (folder_id, title, auto_title, model, params_json) VALUES (?, ?, ?, ?, ?)",
-            (folder_id, title, _is_default_title(title), model, params_json),
+            "INSERT INTO sessions (folder_id, title, auto_title, provider, model, params_json)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (folder_id, title, _is_default_title(title), provider, model, params_json),
         )
         _refresh_auto_title(_get_conn(), cur.lastrowid)
         _get_conn().commit()
@@ -544,8 +620,10 @@ def create_session(
 def update_session(session_id: int, **fields) -> dict | None:
     if not fields:
         return get_session(session_id)
-    if fields.keys() - {"title", "model", "params_json", "params_updated_at"}:
+    if fields.keys() - {"title", "provider", "model", "params_json", "params_updated_at"}:
         raise ValueError("Unsupported session field")
+    if "provider" in fields:
+        providers.get_provider(fields["provider"])
     if "title" in fields:
         fields["title"] = fields["title"].strip()
         fields["auto_title"] = not fields["title"]
@@ -632,19 +710,25 @@ def add_message(
     completion_tokens: int | None = None,
     total_tokens: int | None = None,
     system_prompt_hash: str | None = None,
+    provider: str | None = None,
 ) -> dict:
     with _lock:
+        if model is not None and provider is None:
+            provider = _get_conn().execute(
+                "SELECT provider FROM sessions WHERE id = ?", (session_id,),
+            ).fetchone()["provider"]
         cur = _get_conn().execute(
-            "INSERT INTO messages (session_id, role, content, reasoning, model,"
+            "INSERT INTO messages (session_id, role, content, reasoning, model, provider,"
             " reasoning_effort, prompt_tokens, completion_tokens, total_tokens,"
             " system_prompt_hash)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 session_id,
                 role,
                 content,
                 reasoning,
                 model,
+                provider,
                 reasoning_effort,
                 prompt_tokens,
                 completion_tokens,
@@ -879,10 +963,19 @@ def _enrich_base_reasoning(conn: sqlite3.Connection, user_id: int, request: dict
     return {**request, "messages": messages}
 
 
+def _validate_selection(provider: str, model: str, *, web_search: bool = False) -> None:
+    configured = providers.get_provider(provider)
+    if not model.strip():
+        raise ValueError("Select a model before requesting a response.")
+    if web_search and configured.kind != "ollama":
+        raise ValueError("Web search and fetch require an Ollama provider.")
+
+
 def _set_permission(conn: sqlite3.Connection, user_id: int, web_search: bool | None) -> None:
     row = conn.execute("SELECT * FROM generations WHERE user_message_id = ?", (user_id,)).fetchone()
     store = payloads.Store(conn)
     request = store.get(row["request_id"])
+    _validate_selection(request["provider"], request["model"], web_search=web_search is True)
     if web_search is None:
         web_search = request.get("search_permission", bool(request.get("tools")))
     base = _enrich_base_reasoning(conn, user_id, store.get(row["base_request_id"]))
@@ -896,6 +989,8 @@ def _set_permission(conn: sqlite3.Connection, user_id: int, web_search: bool | N
 def _new_generation(conn: sqlite3.Connection, session: dict, folder: dict,
                     user: dict, rows: list[dict], assistant_id: int | None = None) -> None:
     """Legacy rows have no exact saved request; reconstruct once and retain it."""
+    provider, model = session["provider"], session["model"]
+    _validate_selection(provider, model)
     prompt = folder["system_prompt"]
     prompt_hash = hashlib.sha256(prompt.encode()).hexdigest()
     conn.execute("INSERT OR IGNORE INTO system_prompts VALUES (?, ?)", (prompt_hash, prompt))
@@ -908,7 +1003,7 @@ def _new_generation(conn: sqlite3.Connection, session: dict, folder: dict,
     messages = ([{"role": "system", "content": prompt}] if prompt else []) + _history_messages(conn, prefix)
     store = payloads.Store(conn)
     request_id = store.put({
-        "model": session["model"],
+        "provider": provider, "model": model,
         "params": {k: v for k, v in json.loads(session["params_json"]).items() if k in DEFAULT_PARAMS},
         "messages": messages, "tools": [], "system_prompt_hash": prompt_hash,
     })
@@ -920,6 +1015,13 @@ def _new_generation(conn: sqlite3.Connection, session: dict, folder: dict,
 
 
 def _queue_generation(conn: sqlite3.Connection, session_id: int, user_id: int) -> dict:
+    store = payloads.Store(conn)
+    request_id = conn.execute(
+        "SELECT request_id FROM generations WHERE user_message_id = ? AND session_id = ?",
+        (user_id, session_id),
+    ).fetchone()["request_id"]
+    _validate_selection(store.get(store.child(request_id, "provider")),
+                        store.get(store.child(request_id, "model")))
     conn.execute(
         "UPDATE generations SET status = 'queued', content = '', reasoning = '',"
         " error = NULL, attempt = attempt + 1 WHERE user_message_id = ? AND session_id = ?",
@@ -993,6 +1095,7 @@ def regenerate_response(session_id: int, assistant_message_id: int, *, web_searc
         base = _enrich_base_reasoning(
             conn, user_id, store.get(current["base_request_id"] or current["request_id"])
         )
+        _validate_selection(base["provider"], base["model"], web_search=web_search is True)
         if web_search is None:
             request = store.get(current["request_id"])
             base["tools"] = allowed_tools(request.get("search_permission", bool(request.get("tools"))))
@@ -1314,6 +1417,7 @@ def _edited_provenance(store: payloads.Store, source: dict, session_id: int,
         "source_trace": previous.get("source_trace", []) if previous else
                         (store.get(trace_id) if trace_id else []),
         "source_model": previous.get("source_model") if previous else source["model"],
+        "source_provider": previous.get("source_provider") if previous else source["provider"],
         "source_reasoning": previous.get("source_reasoning") if previous else source["reasoning"],
         "source_usage": previous.get("source_usage") if previous else {
             key: source[key] for key in ("prompt_tokens", "completion_tokens", "total_tokens")
@@ -1409,9 +1513,9 @@ def save_edited_fork(session_id: int, draft: dict, *, send: bool = False,
             " WHERE m.session_id = ?", (session_id,)
         )}
         cur = conn.execute(
-            "INSERT INTO sessions (folder_id, title, auto_title, model, params_json, params_updated_at)"
-            " VALUES (?, ?, 0, ?, ?, ?)",
-            (source["folder_id"], source["title"], source["model"],
+            "INSERT INTO sessions (folder_id, title, auto_title, provider, model, params_json, params_updated_at)"
+            " VALUES (?, ?, 0, ?, ?, ?, ?)",
+            (source["folder_id"], source["title"], source["provider"], source["model"],
              source["params_json"], source["params_updated_at"]),
         )
         fork_id = cur.lastrowid
@@ -1435,6 +1539,8 @@ def save_edited_fork(session_id: int, draft: dict, *, send: bool = False,
                         "source_user_message_id": group["user_message_id"],
                         "source_event_index": group["event_indexes"][0],
                         "before_reasoning": group["reasoning"],
+                        "source_provider": previous.get("source_provider", event["request"]["provider"]),
+                        "source_model": previous.get("source_model", event["request"]["model"]),
                         "source_reasoning": previous.get("source_reasoning", group["reasoning"]),
                         "source_usage": previous.get("source_usage", event.get("usage")),
                     }
@@ -1473,7 +1579,7 @@ def save_edited_fork(session_id: int, draft: dict, *, send: bool = False,
                     store, row, session_id, kind, historical, edited_fields
                 )
             if kind == "manual":
-                for key in ("model", "reasoning_effort",
+                for key in ("provider", "model", "reasoning_effort",
                             "prompt_tokens", "completion_tokens", "total_tokens"):
                     copied[key] = None
             columns = ", ".join(copied)
@@ -1499,7 +1605,7 @@ def save_edited_fork(session_id: int, draft: dict, *, send: bool = False,
                     if row["id"] == user_id:
                         break
                 base = {
-                    "model": source["model"],
+                    "provider": source["provider"], "model": source["model"],
                     "params": {k: v for k, v in json.loads(source["params_json"]).items() if k in DEFAULT_PARAMS},
                     "messages": ([{"role": "system", "content": prompt}] if prompt else [])
                                 + _history_messages(conn, prefix, exclude_trace_user_id=user_id),
@@ -1559,9 +1665,9 @@ def fork_session(session_id: int, message_id: int, *, event_index: int | None = 
             raise ValueError("Tool history requires an event boundary.")
         prefix = rows[:boundary + 1]
         cur = conn.execute(
-            "INSERT INTO sessions (folder_id, title, auto_title, model, params_json, params_updated_at)"
-            " VALUES (?, ?, 0, ?, ?, ?)",
-            (source["folder_id"], source["title"], source["model"],
+            "INSERT INTO sessions (folder_id, title, auto_title, provider, model, params_json, params_updated_at)"
+            " VALUES (?, ?, 0, ?, ?, ?, ?)",
+            (source["folder_id"], source["title"], source["provider"], source["model"],
              source["params_json"], source["params_updated_at"]),
         )
         fork_id = cur.lastrowid
@@ -1662,6 +1768,7 @@ def enqueue_turns(session_id: int, chunks: list[str], *, attachments: list[dict]
             raise ValueError("This folder stores notes")
         if folder["type"] != "chat" and (attachments or web_search):
             raise ValueError("Attachments and web access are only available in Chat folders.")
+        _validate_selection(session["provider"], session["model"], web_search=web_search)
         if conn.execute(
             "SELECT 1 FROM generations WHERE session_id = ? AND status IN ('queued', 'running')",
             (session_id,),
@@ -1691,6 +1798,7 @@ def enqueue_turns(session_id: int, chunks: list[str], *, attachments: list[dict]
             user_id = cur.lastrowid
             messages = prefix + (history if folder["type"] == "chat" else []) + [{"role": "user", "content": api_content}]
             request_id = store.put({
+                "provider": session["provider"],
                 "model": session["model"],
                 "params": {k: v for k, v in json.loads(session["params_json"]).items() if k in DEFAULT_PARAMS},
                 "messages": messages, "tools": allowed_tools(web_search), "system_prompt_hash": prompt_hash,
@@ -1945,13 +2053,14 @@ def finish_generation(job: dict, content: str, reasoning: str, usage: dict | Non
             return
         store = payloads.Store(conn)
         model = store.get(store.child(row["request_id"], "model"))
+        provider = store.get(store.child(row["request_id"], "provider"))
         params = store.get(store.child(row["request_id"], "params"))
         prompt_hash = store.get(store.child(row["request_id"], "system_prompt_hash"))
         cur = conn.execute(
-            "INSERT INTO messages (session_id, role, content, reasoning, model, reasoning_effort,"
+            "INSERT INTO messages (session_id, role, content, reasoning, model, provider, reasoning_effort,"
             " prompt_tokens, completion_tokens, total_tokens, system_prompt_hash)"
-            " VALUES (?, 'assistant', ?, ?, ?, ?, ?, ?, ?, ?)",
-            (row["session_id"], content, reasoning or None, model,
+            " VALUES (?, 'assistant', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (row["session_id"], content, reasoning or None, model, provider,
              params.get("reasoning_effort"), usage.get("prompt_tokens"),
              usage.get("completion_tokens"), usage.get("total_tokens"), prompt_hash),
         )

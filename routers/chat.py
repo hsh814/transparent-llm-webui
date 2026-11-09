@@ -12,6 +12,7 @@ import db
 import generation
 import inputs
 import templating
+import providers
 
 router = APIRouter()
 
@@ -81,6 +82,14 @@ def send_message(
         raise HTTPException(403, "Use Save note in a memo folder.")
     if folder["type"] != "chat" and (files or web_search):
         raise HTTPException(400, "Attachments and web access are available in Chat folders.")
+    try:
+        selected_provider = providers.get_provider(session["provider"])
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    if not session["model"]:
+        raise HTTPException(422, "Choose a model before sending.")
+    if web_search and selected_provider.kind != "ollama":
+        raise HTTPException(422, "Web search and fetch require an Ollama provider.")
     text = content.strip()
     if not text and not files:
         raise HTTPException(400, "Write a message or attach an image or PDF first.")
@@ -346,6 +355,7 @@ def show_prompt(request: Request, session_id: int, message_id: int):
             "messages": original.get("messages", []), "params": original.get("params", {}),
             "tools": original.get("tools", []), "request": original,
             "model": original.get("model") or historical.get("source_model"),
+            "provider": original["provider"],
             "status": "historical", "user_message_id": None,
         } if original else None
     if job is None and message["role"] == "user":
